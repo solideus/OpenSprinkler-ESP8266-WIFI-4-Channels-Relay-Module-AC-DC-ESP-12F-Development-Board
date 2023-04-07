@@ -38,6 +38,10 @@ Changed SSD1306Display.h "Wire.setClock(100000L)" due to incompatibility with RT
 
 I haven't tested with sensors and other components. 
 
+vampywiz17: 
+
+I updated all affected files to 2.1.9(11) version. it is a minor changes. 2.1.9(11) the last version, that easy to update use with ESP boards. with 2.2.0 is to much changes, that i able to rewrite it. I hope somebody will do this in the future.
+
 Suggestions are welcome
 
 Credits: Thanks to the forum user Tobasco

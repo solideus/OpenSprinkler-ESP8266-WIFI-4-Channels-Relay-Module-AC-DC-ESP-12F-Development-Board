@@ -30,13 +30,18 @@
 #include "mqtt.h"
 
 #if defined(ARDUINO)
-	EthernetServer *m_server = NULL;
-	EthernetClient *m_client = NULL;
 	#if defined(ESP8266)
-		ESP8266WebServer *wifi_server = NULL;
+		ESP8266WebServer *update_server = NULL;
+		OTF::OpenThingsFramework *otf = NULL;
+		DNSServer *dns = NULL;
+		ENC28J60lwIP eth(PIN_ETHER_CS); // ENC28J60 lwip for wired Ether
+		bool useEth = false; // tracks whether we are using WiFi or wired Ether connection
 		static uint16_t led_blink_ms = LED_FAST_BLINK;
 	#else
-		SdFat sd;																	// SD card object
+		EthernetServer *m_server = NULL;
+		EthernetClient *m_client = NULL;
+		SdFat sd;	// SD card object
+		bool useEth = true;
 	#endif
 	unsigned long getNtpTime();
 #else // header and defs for RPI/BBB
@@ -52,14 +57,14 @@ void remote_http_callback(char*);
 
 // Small variations have been added to the timing values below
 // to minimize conflicting events
-#define NTP_SYNC_INTERVAL				86413L 	// NTP sync interval (in seconds)
-#define CHECK_NETWORK_INTERVAL	601			// Network checking timeout (in seconds)
-#define CHECK_WEATHER_TIMEOUT		21613L  // Weather check interval (in seconds)
+#define NTP_SYNC_INTERVAL       86413L  // NTP sync interval (in seconds)
+#define CHECK_NETWORK_INTERVAL  601     // Network checking timeout (in seconds)
+#define CHECK_WEATHER_TIMEOUT   21613L  // Weather check interval (in seconds)
 #define CHECK_WEATHER_SUCCESS_TIMEOUT 86400L // Weather check success interval (in seconds)
-#define LCD_BACKLIGHT_TIMEOUT		  15		// LCD backlight timeout (in seconds))
-#define PING_TIMEOUT						  200		// Ping test timeout (in ms)
-#define UI_STATE_MACHINE_INTERVAL	50		// how often does ui_state_machine run (in ms)
-#define CLIENT_READ_TIMEOUT			  5			// client read timeout (in seconds)
+#define LCD_BACKLIGHT_TIMEOUT     15    // LCD backlight timeout (in seconds))
+#define PING_TIMEOUT              200   // Ping test timeout (in ms)
+#define UI_STATE_MACHINE_INTERVAL 50    // how often does ui_state_machine run (in ms)
+#define CLIENT_READ_TIMEOUT       5     // client read timeout (in seconds)
 #define DHCP_CHECKLEASE_INTERVAL  3600L // DHCP check lease interval (in seconds)
 // Define buffers: need them to be sufficiently large to cover string option reading
 char ether_buffer[ETHER_BUFFER_SIZE*2]; // ethernet buffer, make it twice as large to allow overflow
@@ -67,7 +72,7 @@ char tmp_buffer[TMP_BUFFER_SIZE*2]; // scratch buffer, make it twice as large to
 
 // ====== Object defines ======
 OpenSprinkler os; // OpenSprinkler object
-ProgramData pd;		// ProgramdData object
+ProgramData pd;   // ProgramdData object
 
 /* ====== Robert Hillman (RAH)'s implementation of flow sensor ======
  * flow_begin - time when valve turns on
@@ -84,10 +89,10 @@ uint32_t reboot_timer = 0;
 
 void flow_poll() {
 	#if defined(ESP8266)
-	if(os.hw_rev == 2) pinModeExt(PIN_SENSOR1, INPUT_PULLUP); // this seems necessary for OS 3.2 
+	if(os.hw_rev == 2) pinModeExt(PIN_SENSOR1, INPUT_PULLUP); // this seems necessary for OS 3.2
 	#endif
 	byte curr_flow_state = digitalReadExt(PIN_SENSOR1);
-	if(!(prev_flow_state==HIGH && curr_flow_state==LOW)) {	// only record on falling edge
+	if(!(prev_flow_state==HIGH && curr_flow_state==LOW)) { // only record on falling edge
 		prev_flow_state = curr_flow_state;
 		return;
 	}
@@ -96,7 +101,7 @@ void flow_poll() {
 	flow_count++;
 
 	/* RAH implementation of flow sensor */
-	if (flow_start==0) { flow_gallons=0; flow_start=curr;}	// if first pulse, record time
+	if (flow_start==0) { flow_gallons=0; flow_start=curr;} // if first pulse, record time
 	if ((curr-flow_start)<90000) { flow_gallons=0; } // wait 90 seconds before recording flow_begin
 	else {	if (flow_gallons==1)	{  flow_begin = curr;}}
 	flow_stop = curr; // get time in ms for stop
@@ -108,10 +113,10 @@ void flow_poll() {
 // ====== UI defines ======
 static char ui_anim_chars[3] = {'.', 'o', 'O'};
 
-#define UI_STATE_DEFAULT	 0
-#define UI_STATE_DISP_IP	 1
-#define UI_STATE_DISP_GW	 2
-#define UI_STATE_RUNPROG	 3
+#define UI_STATE_DEFAULT   0
+#define UI_STATE_DISP_IP   1
+#define UI_STATE_DISP_GW   2
+#define UI_STATE_RUNPROG   3
 
 static byte ui_state = UI_STATE_DEFAULT;
 static byte ui_state_runprog = 0;
@@ -147,17 +152,17 @@ void ui_state_machine() {
 			led_toggle_timeout = millis() + led_blink_ms;
 		}
 	}
-#endif	
+#endif
 
 	if (!os.button_timeout) {
 		os.lcd_set_brightness(0);
-		ui_state = UI_STATE_DEFAULT;	// also recover to default state
+		ui_state = UI_STATE_DEFAULT;  // also recover to default state
 	}
 
 	// read button, if something is pressed, wait till release
 	byte button = os.button_read(BUTTON_WAIT_HOLD);
 
-	if (button & BUTTON_FLAG_DOWN) {	 // repond only to button down events
+	if (button & BUTTON_FLAG_DOWN) {  // repond only to button down events
 		os.button_timeout = LCD_BACKLIGHT_TIMEOUT;
 		os.lcd_set_brightness(1);
 	} else {
@@ -168,33 +173,40 @@ void ui_state_machine() {
 	case UI_STATE_DEFAULT:
 		switch (button & BUTTON_MASK) {
 		case BUTTON_1:
-			if (button & BUTTON_FLAG_HOLD) {	// holding B1
+			if (button & BUTTON_FLAG_HOLD) {  // holding B1
 				if (digitalReadExt(PIN_BUTTON_3)==0) { // if B3 is pressed while holding B1, run a short test (internal test)
 					if(!ui_confirm(PSTR("Start 2s test?"))) {ui_state = UI_STATE_DEFAULT; break;}
 					manual_start_program(255, 0);
+					#if(ESP12F_RELAY_X4 == 0)
+				} else if (digitalReadExt(PIN_BUTTON_2)==0) { // if B2 is pressed while holding B1, display gateway IP
+					#else
+					/** ESP12F_RELAY_X4 Next line altered as GPIO on Button 2 goes High when pressed */
 				} else if (digitalReadExt(PIN_BUTTON_2)==1) { // if B2 is pressed while holding B1, display gateway IP
+					#endif
 					os.lcd.clear(0, 1);
 					os.lcd.setCursor(0, 0);
 					#if defined(ESP8266)
-					if (!m_server) { os.lcd.print(WiFi.gatewayIP()); }
-					else
+					if (useEth) { os.lcd.print(eth.gatewayIP()); }
+					else { os.lcd.print(WiFi.gatewayIP()); }
+					#else
+					{ os.lcd.print(Ethernet.gatewayIP()); }
 					#endif
-					{	os.lcd.print(Ethernet.gatewayIP());	}
 					os.lcd.setCursor(0, 1);
 					os.lcd_print_pgm(PSTR("(gwip)"));
 					ui_state = UI_STATE_DISP_IP;
-				} else {	// if no other button is clicked, stop all zones
+				} else {  // if no other button is clicked, stop all zones
 					if(!ui_confirm(PSTR("Stop all zones?"))) {ui_state = UI_STATE_DEFAULT; break;}
 					reset_all_stations();
 				}
-			} else {	// clicking B1: display device IP and port
-				os.lcd.clear(0, 1);  
+			} else {  // clicking B1: display device IP and port
+				os.lcd.clear(0, 1);
 				os.lcd.setCursor(0, 0);
 				#if defined(ESP8266)
-				if (!m_server) { os.lcd.print(WiFi.localIP());	}
-				else
-				#endif
+				if (useEth) { os.lcd.print(eth.localIP()); }
+				else { os.lcd.print(WiFi.localIP()); }
+				#else
 				{ os.lcd.print(Ethernet.localIP()); }
+				#endif
 				os.lcd.setCursor(0, 1);
 				os.lcd_print_pgm(PSTR(":"));
 				uint16_t httpport = (uint16_t)(os.iopts[IOPT_HTTPPORT_1]<<8) + (uint16_t)os.iopts[IOPT_HTTPPORT_0];
@@ -204,7 +216,7 @@ void ui_state_machine() {
 			}
 			break;
 		case BUTTON_2:
-			if (button & BUTTON_FLAG_HOLD) {	// holding B2
+			if (button & BUTTON_FLAG_HOLD) {  // holding B2
 				if (digitalReadExt(PIN_BUTTON_1)==0) { // if B1 is pressed while holding B2, display external IP
 					os.lcd_print_ip((byte*)(&os.nvdata.external_ip), 1);
 					os.lcd.setCursor(0, 1);
@@ -215,42 +227,43 @@ void ui_state_machine() {
 					os.lcd_print_time(os.checkwt_success_lasttime);
 					os.lcd.setCursor(0, 1);
 					os.lcd_print_pgm(PSTR("(lswc)"));
-					ui_state = UI_STATE_DISP_IP;					
-				} else {	// if no other button is clicked, reboot
+					ui_state = UI_STATE_DISP_IP;
+				} else {  // if no other button is clicked, reboot
 					if(!ui_confirm(PSTR("Reboot device?"))) {ui_state = UI_STATE_DEFAULT; break;}
 					os.reboot_dev(REBOOT_CAUSE_BUTTON);
 				}
-			} else {	// clicking B2: display MAC
+			} else {  // clicking B2: display MAC
 				os.lcd.clear(0, 1);
 				byte mac[6];
-				#if defined(ESP8266)
-				os.load_hardware_mac(mac, m_server!=NULL);
-				#else
-				os.load_hardware_mac(mac);
-				#endif
+				os.load_hardware_mac(mac, useEth);
 				os.lcd_print_mac(mac);
 				ui_state = UI_STATE_DISP_GW;
 			}
 			break;
 		case BUTTON_3:
-			if (button & BUTTON_FLAG_HOLD) {	// holding B3
-				if (digitalReadExt(PIN_BUTTON_1)==0) {	// if B1 is pressed while holding B3, display up time
+			if (button & BUTTON_FLAG_HOLD) {  // holding B3
+				if (digitalReadExt(PIN_BUTTON_1)==0) {  // if B1 is pressed while holding B3, display up time
 					os.lcd_print_time(os.powerup_lasttime);
 					os.lcd.setCursor(0, 1);
 					os.lcd_print_pgm(PSTR("(lupt) cause:"));
 					os.lcd.print(os.last_reboot_cause);
-					ui_state = UI_STATE_DISP_IP;							
-				} else if(digitalReadExt(PIN_BUTTON_2)==1) {	// if B2 is pressed while holding B3, reset to AP and reboot
+					ui_state = UI_STATE_DISP_IP;
+				#if(ESP12F_RELAY_X4 == 0)
+				} else if(digitalReadExt(PIN_BUTTON_2)==0) {  // if B2 is pressed while holding B3, reset to AP and reboot
+				#else
+				  /** ESP12F_RELAY_X4 Next line altered as GPIO on Button 2 goes High when pressed  */
+				} else if(digitalReadExt(PIN_BUTTON_2)==1) {  // if B2 is pressed while holding B3, reset to AP and reboot 
+				#endif
 					#if defined(ESP8266)
 					if(!ui_confirm(PSTR("Reset to AP?"))) {ui_state = UI_STATE_DEFAULT; break;}
 					os.reset_to_ap();
 					#endif
-				} else {	// if no other button is clicked, go to Run Program main menu
+				} else {  // if no other button is clicked, go to Run Program main menu
 					os.lcd_print_line_clear_pgm(PSTR("Run a Program:"), 0);
 					os.lcd_print_line_clear_pgm(PSTR("Click B3 to list"), 1);
 					ui_state = UI_STATE_RUNPROG;
 				}
-			} else {	// clicking B3: switch board display (cycle through master and all extension boards)
+			} else {  // clicking B3: switch board display (cycle through master and all extension boards)
 				os.status.display_board = (os.status.display_board + 1) % (os.nboards);
 			}
 			break;
@@ -292,7 +305,6 @@ void ui_state_machine() {
 void do_setup() {
 	/* Clear WDT reset flag. */
 #if defined(ESP8266)
-	if(wifi_server) { delete wifi_server; wifi_server = NULL; }
 	WiFi.persistent(false);
 	led_blink_ms = LED_FAST_BLINK;
 #else
@@ -301,17 +313,17 @@ void do_setup() {
 
 	DEBUG_BEGIN(115200);
 	DEBUG_PRINTLN(F("started"));
-	
-	os.begin();					 // OpenSprinkler init
+
+	os.begin();          // OpenSprinkler init
 	os.options_setup();  // Setup options
 
-	pd.init();						// ProgramData init
+	pd.init();           // ProgramData init
 
 	// set time using RTC if it exists
 	if(RTC.exists())	setTime(RTC.get());
 	os.lcd_print_time(os.now_tz());  // display time to LCD
 	os.powerup_lasttime = os.now_tz();
-	
+
 #if !defined(ESP8266)
 	// enable WDT
 	/* In order to change WDE or the prescaler, we need to
@@ -328,6 +340,7 @@ void do_setup() {
 	} else {
 		os.status.network_fails = 1;
 	}
+
 	os.status.req_network = 0;
 	os.status.req_ntpsync = 1;
 
@@ -335,6 +348,12 @@ void do_setup() {
 	os.status.req_mqtt_restart = true;
 
 	os.apply_all_station_bits(); // reset station bits
+
+	// because at reboot we don't know if special stations
+	// are in OFF state, here we explicitly turn them off
+	for(byte sid=0;sid<os.nstations;sid++) {
+		os.switch_special_station(sid, 0);
+	}
 
 	os.button_timeout = LCD_BACKLIGHT_TIMEOUT;
 }
@@ -359,11 +378,11 @@ ISR(WDT_vect)
 #else
 
 void do_setup() {
-	initialiseEpoch();	 // initialize time reference for millis() and micros()
-	os.begin();					 // OpenSprinkler init
+	initialiseEpoch();   // initialize time reference for millis() and micros()
+	os.begin();          // OpenSprinkler init
 	os.options_setup();  // Setup options
 
-	pd.init();						// ProgramData init
+	pd.init();           // ProgramData init
 
 	if (os.start_network()) {  // initialize network
 		DEBUG_PRINTLN("network established.");
@@ -374,6 +393,12 @@ void do_setup() {
 	}
 	os.status.req_network = 0;
 
+	// because at reboot we don't know if special stations
+	// are in OFF state, here we explicitly turn them off
+	for(byte sid=0;sid<os.nstations;sid++) {
+		os.switch_special_station(sid, 0);
+	}
+
 	os.mqtt.init();
 	os.status.req_mqtt_restart = true;
 }
@@ -381,8 +406,9 @@ void do_setup() {
 
 void write_log(byte type, ulong curr_time);
 void schedule_all_stations(ulong curr_time);
-void turn_on_station(byte sid);
-void turn_off_station(byte sid, ulong curr_time);
+void turn_on_station(byte sid, ulong duration);
+void turn_off_station(byte sid, ulong curr_time, byte shift=0);
+void handle_expired_station(byte sid, ulong curr_time);
 void process_dynamic_events(ulong curr_time);
 void check_network();
 void check_weather();
@@ -391,11 +417,20 @@ void perform_ntp_sync();
 void delete_log(char *name);
 
 #if defined(ESP8266)
+bool delete_log_oldest();
 void start_server_ap();
 void start_server_client();
-#endif
-
+static Ticker reboot_ticker;
+void reboot_in(uint32_t ms) {
+	if(os.state != OS_STATE_WAIT_REBOOT) {
+		os.state = OS_STATE_WAIT_REBOOT;
+		DEBUG_PRINTLN(F("Prepare to restart..."));
+		reboot_ticker.once_ms(ms, ESP.restart);
+	}
+}
+#else
 void handle_web_request(char *p);
+#endif
 
 /** Main Loop */
 void do_loop()
@@ -413,120 +448,117 @@ void do_loop()
 	static ulong last_time = 0;
 	static ulong last_minute = 0;
 
-	byte bid, sid, s, pid, qid, bitvalue;
+	byte bid, sid, s, pid, qid, gid, bitvalue;
 	ProgramStruct prog;
 
 	os.status.mas = os.iopts[IOPT_MASTER_STATION];
 	os.status.mas2= os.iopts[IOPT_MASTER_STATION_2];
 	time_t curr_time = os.now_tz();
-	
+
 	// ====== Process Ethernet packets ======
 #if defined(ARDUINO)	// Process Ethernet packets for Arduino
 	#if defined(ESP8266)
 	static ulong connecting_timeout;
-	if (m_server) {	// if wired Ethernet
-		led_blink_ms = 0;
-
-		static unsigned long dhcp_timeout = 0;
-		if(curr_time > dhcp_timeout) {
-			Ethernet.maintain();
-			dhcp_timeout = curr_time + DHCP_CHECKLEASE_INTERVAL;
-		}
-		EthernetClient client = m_server->available();
-		if (client) {
-			ulong cli_timeout = now()+CLIENT_READ_TIMEOUT;
-			while(client.connected() && now()<cli_timeout) {
-				size_t size = client.available();
-				if(size>0) {
-					if(size>ETHER_BUFFER_SIZE) size=ETHER_BUFFER_SIZE;
-					int len = client.read((uint8_t*) ether_buffer, size);
-					if(len>0) {
-						m_client = &client;
-						ether_buffer[len] = 0;	// properly end the buffer
-						handle_web_request(ether_buffer);
-						m_client = NULL;
-						break;
-					}
-				}
-			}
-			client.stop();
-		}
-
-	} else {	
-		switch(os.state) {
-		case OS_STATE_INITIAL:
-			if(os.get_wifi_mode()==WIFI_MODE_AP) {
-				start_server_ap();
-				os.state = OS_STATE_CONNECTED;
-				connecting_timeout = 0;
-			} else {
-				led_blink_ms = LED_SLOW_BLINK;
-				start_network_sta(os.wifi_ssid.c_str(), os.wifi_pass.c_str());
-				os.config_ip();
-				os.state = OS_STATE_CONNECTING;
-				connecting_timeout = millis() + 120000L;
-				os.lcd.setCursor(0, -1);
-				os.lcd.print(F("Connecting to..."));			
-				os.lcd.setCursor(0, 2);
-				os.lcd.print(os.wifi_ssid);
-			}
-			break;
-			
-		case OS_STATE_TRY_CONNECT:
-			led_blink_ms = LED_SLOW_BLINK;	
-			start_network_sta_with_ap(os.wifi_ssid.c_str(), os.wifi_pass.c_str());
-			os.config_ip();
+	switch(os.state) {
+	case OS_STATE_INITIAL:
+		if(useEth) {
+			led_blink_ms = 0;
+			os.set_screen_led(LOW);
+			os.lcd.clear();
+			os.save_wifi_ip();
+			start_server_client();
 			os.state = OS_STATE_CONNECTED;
-			break;
-		 
-		case OS_STATE_CONNECTING:
-			if(WiFi.status() == WL_CONNECTED) {
-				led_blink_ms = 0;
-				os.set_screen_led(LOW);
-				os.lcd.clear();
-				os.save_wifi_ip();
-				start_server_client();
-				os.state = OS_STATE_CONNECTED;
+			connecting_timeout = 0;
+		} else if(os.get_wifi_mode()==WIFI_MODE_AP) {
+			start_server_ap();
+			dns->setErrorReplyCode(DNSReplyCode::NoError);
+			dns->start(53, "*", WiFi.softAPIP());
+			os.state = OS_STATE_CONNECTED;
+			connecting_timeout = 0;
+		} else {
+			led_blink_ms = LED_SLOW_BLINK;
+			if(os.sopt_load(SOPT_STA_BSSID_CHL).length()>0 && os.wifi_channel<255) {
+				start_network_sta(os.wifi_ssid.c_str(), os.wifi_pass.c_str(), (int32_t)os.wifi_channel, os.wifi_bssid);
+			}
+			else
+				start_network_sta(os.wifi_ssid.c_str(), os.wifi_pass.c_str());
+			os.config_ip();
+			os.state = OS_STATE_CONNECTING;
+			connecting_timeout = millis() + 120000L;
+			os.lcd.setCursor(0, -1);
+			os.lcd.print(F("Connecting to..."));
+			os.lcd.setCursor(0, 2);
+			os.lcd.print(os.wifi_ssid);
+		}
+		break;
+
+	case OS_STATE_TRY_CONNECT:
+		led_blink_ms = LED_SLOW_BLINK;
+		if(os.sopt_load(SOPT_STA_BSSID_CHL).length()>0 && os.wifi_channel<255) {
+			start_network_sta_with_ap(os.wifi_ssid.c_str(), os.wifi_pass.c_str(), (int32_t)os.wifi_channel, os.wifi_bssid);
+		}
+		else
+			start_network_sta_with_ap(os.wifi_ssid.c_str(), os.wifi_pass.c_str());
+		os.config_ip();
+		os.state = OS_STATE_CONNECTED;
+		break;
+
+	case OS_STATE_CONNECTING:
+		if(WiFi.status() == WL_CONNECTED) {
+			led_blink_ms = 0;
+			os.set_screen_led(LOW);
+			os.lcd.clear();
+			os.save_wifi_ip();
+			start_server_client();
+			os.state = OS_STATE_CONNECTED;
+			connecting_timeout = 0;
+		} else {
+			if(millis()>connecting_timeout) {
+				os.state = OS_STATE_INITIAL;
+				WiFi.disconnect(true);
+				DEBUG_PRINTLN(F("timeout"));
+			}
+		}
+		break;
+
+	case OS_STATE_WAIT_REBOOT:
+		if(dns) dns->processNextRequest();
+		if(otf) otf->loop();
+		if(update_server) update_server->handleClient();
+		break;
+
+	case OS_STATE_CONNECTED:
+		if(os.get_wifi_mode() == WIFI_MODE_AP) {
+			dns->processNextRequest();
+			update_server->handleClient();
+			otf->loop();
+			connecting_timeout = 0;
+			if(os.get_wifi_mode()==WIFI_MODE_STA) {
+				// already in STA mode, waiting to reboot
+				break;
+			}
+			if(WiFi.status()==WL_CONNECTED && WiFi.localIP() && reboot_timer!=0) {
+				DEBUG_PRINTLN(F("STA connected, set up reboot timer"));
+				reboot_timer = os.now_tz() + 10;
+				//os.reboot_dev(REBOOT_CAUSE_WIFIDONE);
+			}
+		} else {
+			if(useEth || WiFi.status() == WL_CONNECTED) {
+				update_server->handleClient();
+				otf->loop();
 				connecting_timeout = 0;
 			} else {
-				if(millis()>connecting_timeout) {
-					os.state = OS_STATE_INITIAL;
-					WiFi.disconnect(true);
-					DEBUG_PRINTLN(F("timeout"));
-				}
+				// todo: better handling of WiFi disconnection
+				DEBUG_PRINTLN(F("WiFi disconnected, going back to initial"));
+				os.state = OS_STATE_INITIAL;
+				WiFi.disconnect(true);
 			}
-			break;
-			
-		case OS_STATE_CONNECTED:
-			if(os.get_wifi_mode() == WIFI_MODE_AP) {
-				wifi_server->handleClient();
-				connecting_timeout = 0;
-				if(os.get_wifi_mode()==WIFI_MODE_STA) {
-					// already in STA mode, waiting to reboot
-					break;
-				}
-				if(WiFi.status()==WL_CONNECTED && WiFi.localIP()) {
-					os.iopts[IOPT_WIFI_MODE] = WIFI_MODE_STA;
-					os.iopts_save();
-					os.reboot_dev(REBOOT_CAUSE_WIFIDONE);
-				}
-			}
-			else {
-				if(WiFi.status() == WL_CONNECTED) {
-					wifi_server->handleClient();
-					connecting_timeout = 0;
-				} else {
-					DEBUG_PRINTLN(F("WiFi disconnected, going back to initial"));
-					os.state = OS_STATE_INITIAL;
-					WiFi.disconnect(true);
-				}
-			}
-			break;
 		}
+		break;
 	}
-	
+
 	#else // AVR
-	
+
 	static unsigned long dhcp_timeout = 0;
 	if(curr_time > dhcp_timeout) {
 		Ethernet.maintain();
@@ -542,7 +574,7 @@ void do_loop()
 				int len = client.read((uint8_t*) ether_buffer, size);
 				if(len>0) {
 					m_client = &client;
-					ether_buffer[len] = 0;	// properly end the buffer
+					ether_buffer[len] = 0;  // properly end the buffer
 					handle_web_request(ether_buffer);
 					m_client = NULL;
 					break;
@@ -552,11 +584,11 @@ void do_loop()
 		client.stop();
 	}
 
-	wdt_reset();	// reset watchdog timer
+	wdt_reset();  // reset watchdog timer
 	wdt_timeout = 0;
 
 	#endif
-	
+
 	ui_state_machine();
 
 #else // Process Ethernet packets for RPI/BBB
@@ -572,7 +604,7 @@ void do_loop()
 				}
 			} else {
 				m_client = &client;
-				ether_buffer[len] = 0;	// put a zero at the end of the packet
+				ether_buffer[len] = 0;  // put a zero at the end of the packet
 				handle_web_request(ether_buffer);
 				m_client = 0;
 				break;
@@ -598,22 +630,22 @@ void do_loop()
 			pinModeExt(PIN_SENSOR2, INPUT_PULLUP);
 		}
 		#endif
-		
+
 		last_time = curr_time;
 		if (os.button_timeout) os.button_timeout--;
 
 #if defined(ARDUINO)
 		if (!ui_state)
-			os.lcd_print_time(os.now_tz());				// print time
+			os.lcd_print_time(curr_time);  // print time
 #endif
 
 		// ====== Check raindelay status ======
 		if (os.status.rain_delayed) {
-			if (curr_time >= os.nvdata.rd_stop_time) {	// rain delay is over
+			if (curr_time >= os.nvdata.rd_stop_time) {  // rain delay is over
 				os.raindelay_stop();
 			}
 		} else {
-			if (os.nvdata.rd_stop_time > curr_time) {		// rain delay starts now
+			if (os.nvdata.rd_stop_time > curr_time) {  // rain delay starts now
 				os.raindelay_start();
 			}
 		}
@@ -632,7 +664,7 @@ void do_loop()
 			}
 			os.old_status.rain_delayed = os.status.rain_delayed;
 		}
-	
+
 		// ====== Check binary (i.e. rain or soil) sensor status ======
 		os.detect_binarysensor_status(curr_time);
 
@@ -651,14 +683,14 @@ void do_loop()
 		if(os.old_status.sensor2_active != os.status.sensor2_active) {
 			// send notification when sensor1 becomes active
 			if(os.status.sensor2_active) {
-				os.sensor2_active_lasttime = curr_time;				
+				os.sensor2_active_lasttime = curr_time;
 				push_message(NOTIFY_SENSOR2, LOGDATA_SENSOR2, 1);
 			} else {
 				write_log(LOGDATA_SENSOR2, curr_time);
 				push_message(NOTIFY_SENSOR2, LOGDATA_SENSOR2, 0);
 			}
 		}
-		os.old_status.sensor2_active = os.status.sensor2_active;			
+		os.old_status.sensor2_active = os.status.sensor2_active;
 
 		// ===== Check program switch status =====
 		byte pswitch = os.detect_programswitch_status(curr_time);
@@ -671,7 +703,6 @@ void do_loop()
 		if (pswitch & 0x02) {
 			if(pd.nprograms > 1)	manual_start_program(2, 0);
 		}
-		
 
 		// ====== Schedule program data ======
 		ulong curr_minute = curr_time / 60;
@@ -681,6 +712,9 @@ void do_loop()
 		// we only need to check once every minute
 		if (curr_minute != last_minute) {
 			last_minute = curr_minute;
+
+			apply_monthly_adjustment(curr_time); // check and apply monthly adjustment here, if it's selected
+
 			// check through all programs
 			for(pid=0; pid<pd.nprograms; pid++) {
 				pd.read(pid, &prog);	// todo future: reduce load time
@@ -688,7 +722,7 @@ void do_loop()
 					// program match found
 					// check and process special program command
 					if(process_special_program_command(prog.name, curr_time))	continue;
-					
+
 					// process all selected stations
 					for(sid=0;sid<os.nstations;sid++) {
 						bid=sid>>3;
@@ -773,25 +807,26 @@ void do_loop()
 				for(s=0;s<8;s++) {
 					byte sid = bid*8+s;
 
-					// skip master station
+					// skip master stations and any station that's not in the queue
 					if (os.status.mas == sid+1) continue;
 					if (os.status.mas2== sid+1) continue;
 					if (pd.station_qid[sid]==255) continue;
 
 					q = pd.queue + pd.station_qid[sid];
-					// check if this station is scheduled, either running or waiting to run
+
+					// if current station is not running, check if we should turn it on
+					if(!((bitvalue >> s) & 1)) {
+						if (curr_time >= q->st && curr_time < q->st+q->dur) {
+							turn_on_station(sid, q->st+q->dur-curr_time); // the last parameter is expected run time
+						} //if curr_time > scheduled_start_time
+					} // if current station is not running
+
+					// check if this station should be turned off
 					if (q->st > 0) {
-						// if so, check if we should turn it off
 						if (curr_time >= q->st+q->dur) {
 							turn_off_station(sid, curr_time);
 						}
 					}
-					// if current station is not running, check if we should turn it on
-					if(!((bitvalue>>s)&1)) {
-						if (curr_time >= q->st && curr_time < q->st+q->dur) {
-							turn_on_station(sid);
-						} //if curr_time > scheduled_start_time
-					} // if current station is not running
 				}//end_s
 			}//end_bid
 
@@ -799,7 +834,7 @@ void do_loop()
 			int qi;
 			for(qi=pd.nqueue-1;qi>=0;qi--) {
 				q=pd.queue+qi;
-				if(!q->dur || curr_time>=q->st+q->dur)	{
+				if(!q->dur || curr_time >= q->deque_time) {
 					pd.dequeue(qi);
 				}
 			}
@@ -811,7 +846,7 @@ void do_loop()
 			os.apply_all_station_bits();
 
 			// check through runtime queue, calculate the last stop time of sequential stations
-			pd.last_seq_stop_time = 0;
+			memset(pd.last_seq_stop_times, 0, sizeof(ulong)*NUM_SEQ_GROUPS);
 			ulong sst;
 			byte re=os.iopts[IOPT_REMOTE_EXT_MODE];
 			q = pd.queue;
@@ -819,13 +854,14 @@ void do_loop()
 				sid = q->sid;
 				bid = sid>>3;
 				s = sid&0x07;
+				gid = os.get_station_gid(sid);
 				// check if any sequential station has a valid stop time
 				// and the stop time must be larger than curr_time
 				sst = q->st + q->dur;
 				if (sst>curr_time) {
 					// only need to update last_seq_stop_time for sequential stations
-					if (os.attrib_seq[bid]&(1<<s) && !re) {
-						pd.last_seq_stop_time = (sst>pd.last_seq_stop_time ) ? sst : pd.last_seq_stop_time;
+					if (os.is_sequential_station(sid) && !re) {
+						pd.last_seq_stop_times[gid] = (sst > pd.last_seq_stop_times[gid]) ? sst : pd.last_seq_stop_times[gid];
 					}
 				}
 			}
@@ -836,10 +872,10 @@ void do_loop()
 				// turn off all stations
 				os.clear_all_station_bits();
 				os.apply_all_station_bits();
-				// reset runtime
-				pd.reset_runtime();
-				// reset program busy bit
-				os.status.program_busy = 0;
+				pd.reset_runtime(); // reset runtime
+				os.status.program_busy = 0; // reset program busy bit
+				pd.clear_pause(); // TODO: what if pause hasn't expired and a new program is scheduled to run?
+
 				// log flow sensor reading if flow sensor is used
 				if(os.iopts[IOPT_SENSOR1_TYPE]==SENSOR_TYPE_FLOW) {
 					write_log(LOGDATA_FLOWSENSE, curr_time);
@@ -853,53 +889,43 @@ void do_loop()
 		}//if_some_program_is_running
 
 		// handle master
-		if (os.status.mas>0) {
-			int16_t mas_on_adj = water_time_decode_signed(os.iopts[IOPT_MASTER_ON_ADJ]);
-			int16_t mas_off_adj= water_time_decode_signed(os.iopts[IOPT_MASTER_OFF_ADJ]);
-			byte masbit = 0;
-			
-			for(sid=0;sid<os.nstations;sid++) {
-				// skip if this is the master station
-				if (os.status.mas == sid+1) continue;
-				bid = sid>>3;
-				s = sid&0x07;
-				// if this station is running and is set to activate master
-				if ((os.station_bits[bid]&(1<<s)) && (os.attrib_mas[bid]&(1<<s))) {
-					q=pd.queue+pd.station_qid[sid];
-					// check if timing is within the acceptable range
-					if (curr_time >= q->st + mas_on_adj &&
-							curr_time <= q->st + q->dur + mas_off_adj) {
-						masbit = 1;
-						break;
-					}
-				}
-			}
-			os.set_station_bit(os.status.mas-1, masbit);
-		}
-		// handle master2
-		if (os.status.mas2>0) {
-			int16_t mas_on_adj_2 = water_time_decode_signed(os.iopts[IOPT_MASTER_ON_ADJ_2]);
-			int16_t mas_off_adj_2= water_time_decode_signed(os.iopts[IOPT_MASTER_OFF_ADJ_2]);
-			byte masbit2 = 0;
-			for(sid=0;sid<os.nstations;sid++) {
-				// skip if this is the master station
-				if (os.status.mas2 == sid+1) continue;
-				bid = sid>>3;
-				s = sid&0x07;
-				// if this station is running and is set to activate master
-				if ((os.station_bits[bid]&(1<<s)) && (os.attrib_mas2[bid]&(1<<s))) {
-					q=pd.queue+pd.station_qid[sid];
-					// check if timing is within the acceptable range
-					if (curr_time >= q->st + mas_on_adj_2 &&
-							curr_time <= q->st + q->dur + mas_off_adj_2) {
-						masbit2 = 1;
-						break;
-					}
-				}
-			}
-			os.set_station_bit(os.status.mas2-1, masbit2);
-		}		 
+		for (byte mas = MASTER_1; mas < NUM_MASTER_ZONES; mas++) {
 
+			byte mas_id = os.masters[mas][MASOPT_SID];
+
+			if (mas_id) { // if this master station is set
+				int16_t mas_on_adj = os.get_on_adj(mas);
+				int16_t mas_off_adj = os.get_off_adj(mas);
+
+				byte masbit = 0;
+
+				for(sid = 0; sid < os.nstations; sid++) {
+					// skip if this is the master station
+					if (mas_id == sid + 1) continue;
+
+					q = pd.queue + pd.station_qid[sid];
+
+					if (os.bound_to_master(q->sid, mas)) {
+						// check if timing is within the acceptable range
+						if (curr_time >= q->st + mas_on_adj &&
+							curr_time <= q->st + q->dur + mas_off_adj) {
+							masbit = 1;
+							break;
+						}
+					}
+				}
+				os.set_station_bit(mas_id - 1, masbit);
+			}
+		}
+
+		if (os.status.pause_state) {
+			if (os.pause_timer > 0) {
+				os.pause_timer--;
+			} else {
+				os.clear_all_station_bits();
+				pd.clear_pause();
+			}
+		}
 		// process dynamic events
 		process_dynamic_events(curr_time);
 
@@ -908,24 +934,10 @@ void do_loop()
 
 #if defined(ARDUINO)
 		// process LCD display
-		if (!ui_state) {
-			os.lcd_print_station(1, ui_anim_chars[(unsigned long)curr_time%3]);
-			#if defined(ESP8266)
-			if(os.get_wifi_mode()==WIFI_MODE_STA && WiFi.status()==WL_CONNECTED && WiFi.localIP()) {
-				os.lcd.setCursor(0, 2);
-				os.lcd.clear(2, 2);
-				if(os.status.program_busy) {
-					os.lcd.print(F("curr: "));
-					uint16_t curr = os.read_current();
-					os.lcd.print(curr);
-					os.lcd.print(F(" mA"));
-				}
-			}
-			#endif
-		}
-		
-#endif		
-		
+		if (!ui_state) { os.lcd_print_screen(ui_anim_chars[(unsigned long)curr_time%3]); }
+
+#endif
+
 		// handle reboot request
 		// check safe_reboot condition
 		if (os.status.safe_reboot && (curr_time > reboot_timer)) {
@@ -945,7 +957,7 @@ void do_loop()
 				}
 			}
 		} else if(reboot_timer && (curr_time > reboot_timer)) {
-			os.reboot_dev(REBOOT_CAUSE_TIMER);		
+			os.reboot_dev(REBOOT_CAUSE_TIMER);
 		}
 
 		// real-time flow count
@@ -971,14 +983,10 @@ void do_loop()
 		// check weather
 		check_weather();
 
-		byte wuf = os.weather_update_flag;
-		if(wuf) {
-			if((wuf&WEATHER_UPDATE_EIP) | (wuf&WEATHER_UPDATE_WL)) {
-				// at the moment, we only send notification if water level or external IP changed
-				// the other changes, such as sunrise, sunset changes are ignored for notification
-				push_message(NOTIFY_WEATHER_UPDATE, (wuf&WEATHER_UPDATE_EIP)?os.nvdata.external_ip:0,
-																				 (wuf&WEATHER_UPDATE_WL)?os.iopts[IOPT_WATER_PERCENTAGE]:-1);
-			}
+		if(os.weather_update_flag & WEATHER_UPDATE_WL) {
+			// at the moment, we only send notification if water level changed
+			// the other changes, such as sunrise, sunset changes are ignored for notification
+			push_message(NOTIFY_WEATHER_UPDATE, 0, os.iopts[IOPT_WATER_PERCENTAGE]);
 			os.weather_update_flag = 0;
 		}
 		static byte reboot_notification = 1;
@@ -1018,9 +1026,9 @@ void check_weather() {
 	// - the controller is in remote extension mode
 	if (os.status.network_fails>0 || os.iopts[IOPT_REMOTE_EXT_MODE]) return;
 	if (os.status.program_busy) return;
-	
+
 #if defined(ESP8266)
-	if (!m_server) {
+	if (!useEth) { // todo: what about useEth==true?
 		if (os.get_wifi_mode()!=WIFI_MODE_STA || WiFi.status()!=WL_CONNECTED || os.state!=OS_STATE_CONNECTED) return;
 	}
 #endif
@@ -1028,12 +1036,12 @@ void check_weather() {
 	ulong ntz = os.now_tz();
 	if (os.checkwt_success_lasttime && (ntz > os.checkwt_success_lasttime + CHECK_WEATHER_SUCCESS_TIMEOUT)) {
 		// if last successful weather call timestamp is more than allowed threshold
-		// and if the selected adjustment method is not manual
+		// and if the selected adjustment method is not one of the manual methods
 		// reset watering percentage to 100
-		// todo: the firmware currently needs to be explicitly aware of which adjustment methods
-		// use manual watering percentage (namely methods 0 and 2), this is not ideal
+		// todo: the firmware currently needs to be explicitly aware of which adjustment methods, this is not ideal
 		os.checkwt_success_lasttime = 0;
-		if(!(os.iopts[IOPT_USE_WEATHER]==0 || os.iopts[IOPT_USE_WEATHER]==2)) {
+		byte method = os.iopts[IOPT_USE_WEATHER];
+		if(!(method==WEATHER_METHOD_MANUAL || method==WEATHER_METHOD_AUTORAINDELY || method==WEATHER_METHOD_MONTHLY)) {
 			os.iopts[IOPT_WATER_PERCENTAGE] = 100; // reset watering percentage to 100%
 			wt_rawData[0] = 0; 		// reset wt_rawData and errCode
 			wt_errCode = HTTP_RQT_NOT_RECEIVED;
@@ -1052,54 +1060,109 @@ void check_weather() {
 /** Turn on a station
  * This function turns on a scheduled station
  */
-void turn_on_station(byte sid) {
+void turn_on_station(byte sid, ulong duration) {
 	// RAH implementation of flow sensor
 	flow_start=0;
 
-	if (os.set_station_bit(sid, 1)) {
-		push_message(NOTIFY_STATION_ON, sid);
+	if (os.set_station_bit(sid, 1, duration)) {
+		push_message(NOTIFY_STATION_ON, sid, duration);
 	}
+}
+
+// after removing element q, update remaining stations in its group
+void handle_shift_remaining_stations(RuntimeQueueStruct* q, byte gid, ulong curr_time) {
+	RuntimeQueueStruct *s = pd.queue;
+	ulong q_end_time = q->st + q->dur;
+	ulong remainder = 0;
+
+	if (q_end_time > curr_time) { // remainder is non-zero
+		remainder = (q->st < curr_time) ? q_end_time - curr_time : q->dur;
+		for ( ; s < pd.queue + pd.nqueue; s++) {
+
+			// ignore station to be removed and stations in other groups
+			if (s == q || os.get_station_gid(s->sid) != gid || !os.is_sequential_station(s->sid)) {
+				continue;
+			}
+
+			// only shift stations following current station
+			if (s->st >= q_end_time) {
+				s->st -= remainder;
+				s->deque_time -= remainder;
+			}
+		}
+	}
+	pd.last_seq_stop_times[gid] -= remainder;
+	pd.last_seq_stop_times[gid] += 1;
 }
 
 /** Turn off a station
  * This function turns off a scheduled station
- * and writes log record
+ * writes a log record and determines if
+ * the station should be removed from the queue
  */
-void turn_off_station(byte sid, ulong curr_time) {
-	os.set_station_bit(sid, 0);
+void turn_off_station(byte sid, ulong curr_time, byte shift) {
 
 	byte qid = pd.station_qid[sid];
-	// ignore if we are turning off a station that's not running or scheduled to run
-	if (qid>=pd.nqueue)  return;
+	// ignore request if trying to turn off a zone that's not even in the queue
+	if (qid >= pd.nqueue)  {
+		return;
+	}
+	RuntimeQueueStruct *q = pd.queue + qid;
+	byte force_dequeue = 0;
+	byte station_bit = os.is_running(sid);
+	byte gid = os.get_station_gid(q->sid);
+
+	if (shift && os.is_sequential_station(sid) && !os.iopts[IOPT_REMOTE_EXT_MODE]) {
+		handle_shift_remaining_stations(q, gid, curr_time);
+	}
+
+	if (curr_time >= q->deque_time) {
+		if (station_bit) {
+			force_dequeue = 1;
+		} else { // if already off just remove from the queue
+			pd.dequeue(qid);
+			pd.station_qid[sid] = 0xFF;
+			return;
+		}
+	} else if (curr_time >= q->st + q->dur) { // end time and dequeue time are not equal due to master handling
+		if (!station_bit) { return; }
+	} //else { return; }
+
+	os.set_station_bit(sid, 0);
 
 	// RAH implementation of flow sensor
-	if (flow_gallons>1) {
-		if(flow_stop<=flow_begin) flow_last_gpm = 0;
-		else flow_last_gpm = (float) 60000/(float)((flow_stop-flow_begin)/(flow_gallons-1));
+	if (flow_gallons > 1) {
+		if(flow_stop <= flow_begin) flow_last_gpm = 0;
+		else flow_last_gpm = (float) 60000 / (float)((flow_stop-flow_begin) / (flow_gallons - 1));
 	}// RAH calculate GPM, 1 pulse per gallon
 	else {flow_last_gpm = 0;}  // RAH if not one gallon (two pulses) measured then record 0 gpm
 
-	RuntimeQueueStruct *q = pd.queue+qid;
-
 	// check if the current time is past the scheduled start time,
 	// because we may be turning off a station that hasn't started yet
-	if (curr_time > q->st) {
+	if (curr_time >= q->st) {
 		// record lastrun log (only for non-master stations)
-		if(os.status.mas!=(sid+1) && os.status.mas2!=(sid+1)) {
+		if (os.status.mas != (sid + 1) && os.status.mas2 != (sid + 1)) {
 			pd.lastrun.station = sid;
 			pd.lastrun.program = q->pid;
 			pd.lastrun.duration = curr_time - q->st;
 			pd.lastrun.endtime = curr_time;
 
 			// log station run
-			write_log(LOGDATA_STATION, curr_time);
+			write_log(LOGDATA_STATION, curr_time); // LOG_TODO
 			push_message(NOTIFY_STATION_OFF, sid, pd.lastrun.duration);
 		}
 	}
 
-	// dequeue the element
-	pd.dequeue(qid);
-	pd.station_qid[sid] = 0xFF;
+	// make necessary adjustments to sequential time stamps
+	int16_t station_delay = water_time_decode_signed(os.iopts[IOPT_STATION_DELAY_TIME]);
+	if (q->st + q->dur + station_delay == pd.last_seq_stop_times[gid]) { // if removing last station in group
+		pd.last_seq_stop_times[gid] = 0;
+	}
+
+	if (force_dequeue) {
+		pd.dequeue(qid);
+		pd.station_qid[sid] = 0xFF;
+	}
 }
 
 /** Process dynamic events
@@ -1116,7 +1179,7 @@ void process_dynamic_events(ulong curr_time) {
 	if((os.iopts[IOPT_SENSOR1_TYPE] == SENSOR_TYPE_RAIN || os.iopts[IOPT_SENSOR1_TYPE] == SENSOR_TYPE_SOIL)
 		 && os.status.sensor1_active)
 		sn1 = true;
-		
+
 	if((os.iopts[IOPT_SENSOR2_TYPE] == SENSOR_TYPE_RAIN || os.iopts[IOPT_SENSOR2_TYPE] == SENSOR_TYPE_SOIL)
 		 && os.status.sensor2_active)
 		sn2 = true;
@@ -1127,13 +1190,13 @@ void process_dynamic_events(ulong curr_time) {
 		igs = os.attrib_igs[bid];
 		igs2= os.attrib_igs2[bid];
 		igrd= os.attrib_igrd[bid];
-		
+
 		for(s=0;s<8;s++) {
 			sid=bid*8+s;
 
-			// ignore master stations because they are handled separately			 
+			// ignore master stations because they are handled separately
 			if (os.status.mas == sid+1) continue;
-			if (os.status.mas2== sid+1) continue;			 
+			if (os.status.mas2== sid+1) continue;
 			// If this is a normal program (not a run-once or test program)
 			// and either the controller is disabled, or
 			// if raining and ignore rain bit is cleared
@@ -1142,13 +1205,45 @@ void process_dynamic_events(ulong curr_time) {
 			if(qid==255) continue;
 			RuntimeQueueStruct *q = pd.queue + qid;
 
-			if(q->pid>=99) continue;	// if this is a manually started program, proceed
-			if(!en)	turn_off_station(sid, curr_time);	// if system is disabled, turn off zone
-			if(rd && !(igrd&(1<<s))) turn_off_station(sid, curr_time);	// if rain delay is on and zone does not ignore rain delay, turn it off
-			if(sn1&& !(igs &(1<<s))) turn_off_station(sid, curr_time);	// if sensor1 is on and zone does not ignore sensor1, turn it off
-			if(sn2&& !(igs2&(1<<s))) turn_off_station(sid, curr_time);	// if sensor2 is on and zone does not ignore sensor2, turn it off
+			if(q->pid>=99) continue;  // if this is a manually started program, proceed
+			if(!en)	{q->deque_time=curr_time; turn_off_station(sid, curr_time);}  // if system is disabled, turn off zone
+			if(rd && !(igrd&(1<<s))) {q->deque_time=curr_time; turn_off_station(sid, curr_time);}  // if rain delay is on and zone does not ignore rain delay, turn it off
+			if(sn1&& !(igs &(1<<s))) {q->deque_time=curr_time; turn_off_station(sid, curr_time);}  // if sensor1 is on and zone does not ignore sensor1, turn it off
+			if(sn2&& !(igs2&(1<<s))) {q->deque_time=curr_time; turn_off_station(sid, curr_time);}  // if sensor2 is on and zone does not ignore sensor2, turn it off
 		}
 	}
+}
+
+/* Scheduler
+ * this function determines the appropriate start and dequeue times
+ * of stations bound to master stations with on and off adjustments
+ */
+void handle_master_adjustments(ulong curr_time, RuntimeQueueStruct *q) {
+
+	int16_t start_adj = 0;
+	int16_t dequeue_adj = 0;
+
+	for (byte mas = MASTER_1; mas < NUM_MASTER_ZONES; mas++) {
+
+		byte masid = os.masters[mas][MASOPT_SID];
+
+		if (masid && os.bound_to_master(q->sid, mas)) {
+
+			int16_t mas_on_adj = os.get_on_adj(mas);
+			int16_t mas_off_adj = os.get_off_adj(mas);
+
+			start_adj = min(start_adj, mas_on_adj);
+			dequeue_adj = max(dequeue_adj, mas_off_adj);
+		}
+	}
+
+	// in case of negative master on adjustment
+	// push back station's start time to allow sufficient time to turn on master
+	if (q->st - curr_time < abs(start_adj)) {
+		q->st += abs(start_adj);
+	}
+
+	q->deque_time = q->st + q->dur + dequeue_adj;
 }
 
 /** Scheduler
@@ -1156,47 +1251,45 @@ void process_dynamic_events(ulong curr_time) {
  * and schedules the start time of each station
  */
 void schedule_all_stations(ulong curr_time) {
-
-	ulong con_start_time = curr_time + 1;		// concurrent start time
-	ulong seq_start_time = con_start_time;	// sequential start time
-
-	int16_t station_delay = water_time_decode_signed(os.iopts[IOPT_STATION_DELAY_TIME]);
-	// if the sequential queue has stations running
-	if (pd.last_seq_stop_time > curr_time) {
-		seq_start_time = pd.last_seq_stop_time + station_delay;
+	ulong con_start_time = curr_time + 1;   // concurrent start time
+	// if the queue is paused, make sure the start time is after the scheduled pause ends
+	if (os.status.pause_state) {
+		con_start_time += os.pause_timer;
 	}
-
+	int16_t station_delay = water_time_decode_signed(os.iopts[IOPT_STATION_DELAY_TIME]);
+	ulong seq_start_times[NUM_SEQ_GROUPS];  // sequential start times
+	for(byte i=0;i<NUM_SEQ_GROUPS;i++) {
+		seq_start_times[i] = con_start_time;
+		// if the sequential queue already has stations running
+		if (pd.last_seq_stop_times[i] > curr_time) {
+			seq_start_times[i] = pd.last_seq_stop_times[i] + station_delay;
+		}
+	}
 	RuntimeQueueStruct *q = pd.queue;
 	byte re = os.iopts[IOPT_REMOTE_EXT_MODE];
+	byte gid;
+
 	// go through runtime queue and calculate start time of each station
 	for(;q<pd.queue+pd.nqueue;q++) {
 		if(q->st) continue; // if this queue element has already been scheduled, skip
 		if(!q->dur) continue; // if the element has been marked to reset, skip
-		byte sid=q->sid;
-		byte bid=sid>>3;
-		byte s=sid&0x07;
+		gid = os.get_station_gid(q->sid);
 
-		// if this is a sequential station and the controller is not in remote extension mode
-		// use sequential scheduling. station delay time apples
-		if (os.attrib_seq[bid]&(1<<s) && !re) {
-			// sequential scheduling
-			q->st = seq_start_time;
-			seq_start_time += q->dur;
-			seq_start_time += station_delay; // add station delay time
+		// use sequential scheduling per sequential group
+		// apply station delay time
+		if (os.is_sequential_station(q->sid) && !re) {
+			q->st = seq_start_times[gid];
+			seq_start_times[gid] += q->dur;
+			seq_start_times[gid] += station_delay; // add station delay time
 		} else {
 			// otherwise, concurrent scheduling
 			q->st = con_start_time;
 			// stagger concurrent stations by 1 second
 			con_start_time++;
 		}
-		/*DEBUG_PRINT("[");
-		DEBUG_PRINT(sid);
-		DEBUG_PRINT(":");
-		DEBUG_PRINT(q->st);
-		DEBUG_PRINT(",");
-		DEBUG_PRINT(q->dur);
-		DEBUG_PRINT("]");
-		DEBUG_PRINTLN(pd.nqueue);*/
+
+		handle_master_adjustments(curr_time, q);
+
 		if (!os.status.program_busy) {
 			os.status.program_busy = 1;  // set program busy bit
 			// start flow count
@@ -1215,6 +1308,7 @@ void reset_all_stations_immediate() {
 	os.clear_all_station_bits();
 	os.apply_all_station_bits();
 	pd.reset_runtime();
+	pd.clear_pause();
 }
 
 /** Reset all stations
@@ -1252,9 +1346,9 @@ void manual_start_program(byte pid, byte uwt) {
 		s=sid&0x07;
 		// skip if the station is a master station (because master cannot be scheduled independently
 		if ((os.status.mas==sid+1) || (os.status.mas2==sid+1))
-			continue;		 
+			continue;
 		dur = 60;
-		if(pid==255)	dur=2;
+		if(pid==255)  dur=2;
 		else if(pid>0)
 			dur = water_time_resolve(prog.durations[sid]);
 		if(uwt) {
@@ -1296,7 +1390,9 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 		return;
 
 	if (ifttt_enabled) {
-		strcpy_P(postval, PSTR("{\"value1\":\""));
+		strcpy_P(postval, PSTR("{\"value1\":\"On site ["));
+		os.sopt_load(SOPT_DEVICE_NAME, postval+strlen(postval));
+		strcat_P(postval, PSTR("], "));
 	}
 
 	if (os.mqtt.enabled()) {
@@ -1307,11 +1403,13 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 	switch(type) {
 		case  NOTIFY_STATION_ON:
 
-			// todo: add IFTTT support for this event as well
 			if (os.mqtt.enabled()) {
 				sprintf_P(topic, PSTR("opensprinkler/station/%d"), lval);
-				strcpy_P(payload, PSTR("{\"state\":1}"));
+				sprintf_P(payload, PSTR("{\"state\":1,\"duration\":%d}"), (int)fval);
 			}
+
+			// todo: add IFTTT support for this event as well.
+			// currently no support due to the number of events exceeds 8 so need to use more than 1 byte
 			break;
 
 		case NOTIFY_STATION_OFF:
@@ -1325,9 +1423,10 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 				}
 			}
 			if (ifttt_enabled) {
-				char name[STATION_NAME_SIZE];
-				os.get_station_name(lval, name);
-				sprintf_P(postval+strlen(postval), PSTR("Station %s closed. It ran for %d minutes %d seconds."), name, (int)fval/60, (int)fval%60);
+				strcat_P(postval, PSTR("station ["));
+				os.get_station_name(lval, postval+strlen(postval));
+				strcat_P(postval, PSTR("] closed. It ran for "));
+				sprintf_P(postval+strlen(postval), PSTR(" %d minutes %d seconds."), (int)fval/60, (int)fval%60);
 
 				if(os.iopts[IOPT_SENSOR1_TYPE]==SENSOR_TYPE_FLOW) {
 					sprintf_P(postval+strlen(postval), PSTR(" Flow rate: %d.%02d"), (int)flow_last_gpm, (int)(flow_last_gpm*100)%100);
@@ -1338,8 +1437,8 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 		case NOTIFY_PROGRAM_SCHED:
 
 			if (ifttt_enabled) {
-				if (sval) strcat_P(postval, PSTR("Manually scheduled "));
-				else strcat_P(postval, PSTR("Automatically scheduled "));
+				if (sval) strcat_P(postval, PSTR("manually scheduled "));
+				else strcat_P(postval, PSTR("automatically scheduled "));
 				strcat_P(postval, PSTR("Program "));
 				{
 					ProgramStruct prog;
@@ -1357,11 +1456,11 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 				sprintf_P(payload, PSTR("{\"state\":%d}"), (int)fval);
 			}
 			if (ifttt_enabled) {
-				strcat_P(postval, PSTR("Sensor 1 "));
+				strcat_P(postval, PSTR("sensor 1 "));
 				strcat_P(postval, ((int)fval)?PSTR("activated."):PSTR("de-activated."));
 			}
 			break;
-			
+
 		case NOTIFY_SENSOR2:
 
 			if (os.mqtt.enabled()) {
@@ -1369,7 +1468,7 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 				sprintf_P(payload, PSTR("{\"state\":%d}"), (int)fval);
 			}
 			if (ifttt_enabled) {
-				strcat_P(postval, PSTR("Sensor 2 "));
+				strcat_P(postval, PSTR("sensor 2 "));
 				strcat_P(postval, ((int)fval)?PSTR("activated."):PSTR("de-activated."));
 			}
 			break;
@@ -1381,7 +1480,7 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 				sprintf_P(payload, PSTR("{\"state\":%d}"), (int)fval);
 			}
 			if (ifttt_enabled) {
-				strcat_P(postval, PSTR("Rain delay "));
+				strcat_P(postval, PSTR("rain delay "));
 				strcat_P(postval, ((int)fval)?PSTR("activated."):PSTR("de-activated."));
 			}
 			break;
@@ -1393,10 +1492,10 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 			volume = lval*volume;
 			if (os.mqtt.enabled()) {
 				strcpy_P(topic, PSTR("opensprinkler/sensor/flow"));
-				sprintf_P(payload, PSTR("{\"count\":%lu,\"volume\":%d.%02d}"), lval, (int)volume/100, (int)volume%100);
+				sprintf_P(payload, PSTR("{\"count\":%u,\"volume\":%d.%02d}"), lval, (int)volume/100, (int)volume%100);
 			}
 			if (ifttt_enabled) {
-				sprintf_P(postval+strlen(postval), PSTR("Flow count: %lu, volume: %d.%02d"), lval, (int)volume/100, (int)volume%100);
+				sprintf_P(postval+strlen(postval), PSTR("Flow count: %u, volume: %d.%02d"), lval, (int)volume/100, (int)volume%100);
 			}
 			break;
 
@@ -1404,7 +1503,7 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 
 			if (ifttt_enabled) {
 				if(lval>0) {
-					strcat_P(postval, PSTR("External IP updated: "));
+					strcat_P(postval, PSTR("external IP updated: "));
 					byte ip[4] = {(byte)((lval>>24)&0xFF),
 									(byte)((lval>>16)&0xFF),
 									(byte)((lval>>8)&0xFF),
@@ -1412,25 +1511,26 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 					ip2string(postval, ip);
 				}
 				if(fval>=0) {
-					sprintf_P(postval+strlen(postval), PSTR("Water level updated: %d%%."), (int)fval);
+					sprintf_P(postval+strlen(postval), PSTR("water level updated: %d%%."), (int)fval);
 				}
 			}
 			break;
 
 		case NOTIFY_REBOOT:
-			
+
 			if (os.mqtt.enabled()) {
 				strcpy_P(topic, PSTR("opensprinkler/system"));
 				strcpy_P(payload, PSTR("{\"state\":\"started\"}"));
 			}
 			if (ifttt_enabled) {
 				#if defined(ARDUINO)
-					strcat_P(postval, PSTR("Rebooted. Device IP: "));
+					strcat_P(postval, PSTR("rebooted. Device IP: "));
 					#if defined(ESP8266)
 					{
 						IPAddress _ip;
-						if (m_server) {
-							_ip = Ethernet.localIP();
+						if (useEth) {
+							//_ip = Ethernet.localIP();
+							_ip = eth.localIP();
 						} else {
 							_ip = WiFi.localIP();
 						}
@@ -1443,7 +1543,7 @@ void push_message(int type, uint32_t lval, float fval, const char* sval) {
 					//strcat(postval, ":");
 					//itoa(_port, postval+strlen(postval), 10);
 				#else
-					strcat_P(postval, PSTR("Process restarted."));
+					strcat_P(postval, PSTR("process restarted."));
 				#endif
 			}
 			break;
@@ -1486,7 +1586,7 @@ void make_logfile_name(char *name) {
 	sd.chdir("/");
 	#endif
 #endif
-	strcpy(tmp_buffer+TMP_BUFFER_SIZE-10, name);
+	strcpy(tmp_buffer+TMP_BUFFER_SIZE-10, name); // hack: we do this because name is from tmp_buffer too
 	strcpy(tmp_buffer, LOG_PREFIX);
 	strcat(tmp_buffer, tmp_buffer+TMP_BUFFER_SIZE-10);
 	strcat_P(tmp_buffer, PSTR(".txt"));
@@ -1515,14 +1615,21 @@ void write_log(byte type, ulong curr_time) {
 	ultoa(curr_time / 86400, tmp_buffer, 10);
 	make_logfile_name(tmp_buffer);
 
-	// Step 1: open file if exists, or create new otherwise, 
-	// and move file pointer to the end  
+	// Step 1: open file if exists, or create new otherwise,
+	// and move file pointer to the end
 #if defined(ARDUINO) // prepare log folder for Arduino
 
 	#if defined(ESP8266)
-	File file = SPIFFS.open(tmp_buffer, "r+");
+	File file = LittleFS.open(tmp_buffer, "r+");
 	if(!file) {
-		file = SPIFFS.open(tmp_buffer, "w");
+		FSInfo fs_info;
+		LittleFS.info(fs_info);
+		// check if we are getting close to run out of space, and delete some oldest files
+		if(fs_info.totalBytes < fs_info.usedBytes + fs_info.blockSize * 4) {
+			// delete the oldest 7 files (1 week of log)
+			for(byte i=0;i<7;i++)	delete_log_oldest();
+		}
+		file = LittleFS.open(tmp_buffer, "w");
 		if(!file) return;
 	}
 	file.seek(0, SeekEnd);
@@ -1541,7 +1648,7 @@ void write_log(byte type, ulong curr_time) {
 		return;
 	}
 	#endif
-	
+
 #else // prepare log folder for RPI/BBB
 	struct stat st;
 	if(stat(get_filename_fullpath(LOG_PREFIX), &st)) {
@@ -1557,7 +1664,7 @@ void write_log(byte type, ulong curr_time) {
 	}
 	fseek(file, 0, SEEK_END);
 #endif	// prepare log folder
-	
+
 	// Step 2: prepare data buffer
 	strcpy_P(tmp_buffer, PSTR("["));
 
@@ -1612,7 +1719,7 @@ void write_log(byte type, ulong curr_time) {
 
 #if defined(ARDUINO)
 	#if defined(ESP8266)
-	file.write((byte*)tmp_buffer, strlen(tmp_buffer));
+	file.write((const uint8_t*)tmp_buffer, strlen(tmp_buffer));
 	#else
 	file.write(tmp_buffer);
 	#endif
@@ -1623,6 +1730,28 @@ void write_log(byte type, ulong curr_time) {
 #endif
 }
 
+#if defined(ESP8266)
+bool delete_log_oldest() {
+	Dir dir = LittleFS.openDir(LOG_PREFIX);
+	time_t oldest_t = ULONG_MAX;
+	String oldest_fn;
+	while (dir.next()) {
+		time_t t = dir.fileCreationTime();
+		if(t<oldest_t) {
+			oldest_t = t;
+			oldest_fn = dir.fileName();
+		}
+	}
+	if(oldest_fn.length()>0) {
+		DEBUG_PRINT(F("deleting "))
+		DEBUG_PRINTLN(LOG_PREFIX+oldest_fn);
+		LittleFS.remove(LOG_PREFIX+oldest_fn);
+		return true;
+	} else {
+		return false;
+	}
+}
+#endif
 
 /** Delete log file
  * If name is 'all', delete all logs
@@ -1634,15 +1763,15 @@ void delete_log(char *name) {
 	#if defined(ESP8266)
 	if (strncmp(name, "all", 3) == 0) {
 		// delete all log files
-		Dir dir = SPIFFS.openDir(LOG_PREFIX);
+		Dir dir = LittleFS.openDir(LOG_PREFIX);
 		while (dir.next()) {
-			SPIFFS.remove(dir.fileName());
+			LittleFS.remove(LOG_PREFIX+dir.fileName());
 		}
 	} else {
 		// delete a single log file
 		make_logfile_name(name);
-		if(!SPIFFS.exists(tmp_buffer)) return;
-		SPIFFS.remove(tmp_buffer);
+		if(!LittleFS.exists(tmp_buffer)) return;
+		LittleFS.remove(tmp_buffer);
 	}
 	#else
 	if (strncmp(name, "all", 3) == 0) {
@@ -1660,7 +1789,7 @@ void delete_log(char *name) {
 		sd.remove(tmp_buffer);
 	}
 	#endif
-	
+
 #else // delete_log implementation for RPI/BBB
 	if (strncmp(name, "all", 3) == 0) {
 		// delete the log folder
@@ -1717,7 +1846,7 @@ void check_network() {
 			os.nvdata.reboot_cause = REBOOT_CAUSE_NETWORK_FAIL;
 			os.status.safe_reboot = 1;
 		} else if (os.status.network_fails>2) {
-			// if failed more than twice, try to reconnect		
+			// if failed more than twice, try to reconnect
 			if (os.start_network())
 				os.status.network_fails=0;
 		}

@@ -18,17 +18,18 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see
- * <http://www.gnu.org/licenses/>.
+ * <http://www.gnu.org/licenses/>
  */
 
 #include "utils.h"
 #include "OpenSprinkler.h"
 extern OpenSprinkler os;
 
-#if defined(ARDUINO)	// Arduino
+#if defined(ARDUINO)  // Arduino
 
 	#if defined(ESP8266)
 		#include <FS.h>
+		#include <LittleFS.h>
 	#else
 		#include <avr/eeprom.h>
 		#include "SdFat.h"
@@ -72,7 +73,7 @@ void delay(ulong howLong)
 {
 	struct timespec sleeper, dummy ;
 
-	sleeper.tv_sec	= (time_t)(howLong / 1000) ;
+	sleeper.tv_sec  = (time_t)(howLong / 1000) ;
 	sleeper.tv_nsec = (long)(howLong % 1000) * 1000000 ;
 
 	nanosleep (&sleeper, &dummy) ;
@@ -83,7 +84,7 @@ void delayMicrosecondsHard (ulong howLong)
 	struct timeval tNow, tLong, tEnd ;
 
 	gettimeofday (&tNow, NULL) ;
-	tLong.tv_sec	= howLong / 1000000 ;
+	tLong.tv_sec  = howLong / 1000000 ;
 	tLong.tv_usec = howLong % 1000000 ;
 	timeradd (&tNow, &tLong, &tEnd) ;
 
@@ -99,11 +100,11 @@ void delayMicroseconds (ulong howLong)
 
 	/**/ if (howLong ==		0)
 		return ;
-	else if (howLong	< 100)
+	else if (howLong < 100)
 		delayMicrosecondsHard (howLong) ;
 	else
 	{
-		sleeper.tv_sec	= wSecs ;
+		sleeper.tv_sec  = wSecs ;
 		sleeper.tv_nsec = (long)(uSecs * 1000L) ;
 		nanosleep (&sleeper, NULL) ;
 	}
@@ -116,7 +117,7 @@ void initialiseEpoch()
 	struct timeval tv ;
 
 	gettimeofday (&tv, NULL) ;
-	epochMilli = (uint64_t)tv.tv_sec * (uint64_t)1000		 + (uint64_t)(tv.tv_usec / 1000) ;
+	epochMilli = (uint64_t)tv.tv_sec * (uint64_t)1000    + (uint64_t)(tv.tv_usec / 1000) ;
 	epochMicro = (uint64_t)tv.tv_sec * (uint64_t)1000000 + (uint64_t)(tv.tv_usec) ;
 }
 
@@ -169,118 +170,12 @@ unsigned int detect_rpi_rev() {
 
 #endif
 
-void write_to_file(const char *fn, const char *data, ulong size, ulong pos, bool trunc) {
-
-#if defined(ESP8266)
-
-	File f;
-	if(trunc) {
-		f = SPIFFS.open(fn, "w");
-	} else {
-		f = SPIFFS.open(fn, "r+");
-		if(!f) f = SPIFFS.open(fn, "w");
-	}		 
-	if(!f) return;
-	if(pos) f.seek(pos, SeekSet);
-	if(size==0) {
-		f.write((byte*)" ", 1);  // hack to circumvent SPIFFS bug involving writing empty file
-	} else {
-		f.write((byte*)data, size);
-	}
-	f.close();
-	
-#elif defined(ARDUINO)
-
-	sd.chdir("/");
-	SdFile file;
-	int flag = O_CREAT | O_RDWR;
-	if(trunc) flag |= O_TRUNC;
-	int ret = file.open(fn, flag);
-	if(!ret) return;
-	file.seekSet(pos);
-	file.write(data, size);
-	file.close();
-	
-#else
-
-	FILE *file;
-	if(trunc) {
-		file = fopen(get_filename_fullpath(fn), "wb");
-	} else {
-		file = fopen(get_filename_fullpath(fn), "r+b");
-		if(!file) file = fopen(get_filename_fullpath(fn), "wb");
-	}
-	if(!file)  return;
-	fseek(file, pos, SEEK_SET);
-	fwrite(data, 1, size, file);
-	fclose(file);
-	
-#endif
-}
-
-void read_from_file(const char *fn, char *data, ulong maxsize, ulong pos) {
-#if defined(ESP8266)
-
-	File f = SPIFFS.open(fn, "r");
-	if(!f) {
-		data[0]=0;
-		return;  // return with empty string
-	}
-	if(pos)  f.seek(pos, SeekSet);
-	int len = f.read((byte*)data, maxsize);
-	if(len>0) data[len]=0;
-	if(len==1 && data[0]==' ') data[0] = 0;  // hack to circumvent SPIFFS bug involving writing empty file
-	data[maxsize-1]=0;
-	f.close();
-	return;
-
-#elif defined(ARDUINO)
-
-	sd.chdir("/");
-	SdFile file;
-	int ret = file.open(fn, O_READ);
-	if(!ret) {
-		data[0]=0;
-		return;  // return with empty string
-	}
-	file.seekSet(pos);
-	ret = file.fgets(data, maxsize);
-	data[maxsize-1]=0;
-	file.close();
-	return;
-
-#else
-
-	FILE *file;
-	file = fopen(get_filename_fullpath(fn), "rb");
-	if(!file) {
-		data[0] = 0;
-		return;
-	}
-
-	int res;
-	fseek(file, pos, SEEK_SET);
-	if(fgets(data, maxsize, file)) {
-		res = strlen(data);
-	} else {
-		res = 0;
-	}
-	if (res <= 0) {
-		data[0] = 0;
-	}
-
-	data[maxsize-1]=0;
-	fclose(file);
-	return;
-
-#endif
-}
 
 void remove_file(const char *fn) {
 #if defined(ESP8266)
 
-	if(!SPIFFS.exists(fn)) return;
-	SPIFFS.remove(fn);
+	if(!LittleFS.exists(fn)) return;
+	LittleFS.remove(fn);
 
 #elif defined(ARDUINO)
 
@@ -298,7 +193,7 @@ void remove_file(const char *fn) {
 bool file_exists(const char *fn) {
 #if defined(ESP8266)
 
-	return SPIFFS.exists(fn);
+	return LittleFS.exists(fn);
 
 #elif defined(ARDUINO)
 
@@ -319,8 +214,8 @@ bool file_exists(const char *fn) {
 void file_read_block(const char *fn, void *dst, ulong pos, ulong len) {
 #if defined(ESP8266)
 
-	// do not use File.readBytes or readBytesUntil because it's very slow  
-	File f = SPIFFS.open(fn, "r");
+	// do not use File.readBytes or readBytesUntil because it's very slow
+	File f = LittleFS.open(fn, "r");
 	if(f) {
 		f.seek(pos, SeekSet);
 		f.read((byte*)dst, len);
@@ -344,7 +239,7 @@ void file_read_block(const char *fn, void *dst, ulong pos, ulong len) {
 		fseek(fp, pos, SEEK_SET);
 		fread(dst, 1, len, fp);
 		fclose(fp);
-	}  
+	}
 
 #endif
 }
@@ -352,8 +247,8 @@ void file_read_block(const char *fn, void *dst, ulong pos, ulong len) {
 void file_write_block(const char *fn, const void *src, ulong pos, ulong len) {
 #if defined(ESP8266)
 
-	File f = SPIFFS.open(fn, "r+");
-	if(!f) f = SPIFFS.open(fn, "w");
+	File f = LittleFS.open(fn, "r+");
+	if(!f) f = LittleFS.open(fn, "w");
 	if(f) {
 		f.seek(pos, SeekSet);
 		f.write((byte*)src, len);
@@ -392,7 +287,7 @@ void file_copy_block(const char *fn, ulong from, ulong to, ulong len, void *tmp)
 	if(tmp==NULL) { return; }
 #if defined(ESP8266)
 
-	File f = SPIFFS.open(fn, "r+");
+	File f = LittleFS.open(fn, "r+");
 	if(!f) return;
 	f.seek(from, SeekSet);
 	f.read((byte*)tmp, len);
@@ -430,7 +325,7 @@ void file_copy_block(const char *fn, ulong from, ulong to, ulong len, void *tmp)
 byte file_cmp_block(const char *fn, const char *buf, ulong pos) {
 #if defined(ESP8266)
 
-	File f = SPIFFS.open(fn, "r");
+	File f = LittleFS.open(fn, "r");
 	if(f) {
 		f.seek(pos, SeekSet);
 		char c = f.read();
@@ -469,7 +364,7 @@ byte file_cmp_block(const char *fn, const char *buf, ulong pos) {
 		}
 		fclose(fp);
 		return (*buf==c)?0:1;
-	}  
+	}
 
 #endif
 	return 1;
@@ -583,3 +478,76 @@ void peel_http_header(char* buffer) { // remove the HTTP header
 		i++;
 	}
 }
+
+void strReplace(char *str, char c, char r) {
+	for(byte i=0;i<strlen(str);i++) {
+		if(str[i]==c) str[i]=r;
+	}
+}
+
+static const byte month_days[] = {31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+
+bool isValidDate(byte m, byte d) {
+	if(m<1 || m>12) return false;
+	if(d<1 || d>month_days[m-1]) return false;
+	return true;
+}
+
+bool isValidDate(uint16_t date) {
+	if (date < MIN_ENCODED_DATE || date > MAX_ENCODED_DATE) {
+		return false;
+	}
+	byte month = date >> 5;
+	byte day = date & 31;
+	return isValidDate(month, day);
+}
+
+#if defined(ESP8266)
+byte hex2dec(const char *hex) {
+	return strtol(hex, NULL, 16);
+}
+
+bool isHex(char c) {
+	if(c>='0' && c<='9') return true;
+	if(c>='a' && c<='f') return true;
+	if(c>='A' && c<='F') return true;
+	return false;
+}
+
+bool isValidMAC(const char *_mac) {
+	char mac[18], *hex;
+	strncpy(mac, _mac, 18);
+	mac[17] = 0;
+	byte count = 0;
+	hex = strtok(mac, ":");
+	if(strlen(hex)!=2) return false;
+	if(!isHex(hex[0]) || !isHex(hex[1])) return false;
+	count++;
+	while(true) {
+		hex = strtok(NULL, ":");
+		if(hex==NULL) break;
+		if(strlen(hex)!=2) return false;
+		if(!isHex(hex[0]) || !isHex(hex[1])) return false;
+		count++;
+		yield();
+	}
+	if(count!=6) return false;
+	else return true;
+}
+
+void str2mac(const char *_str, byte mac[]) {
+	char str[18], *hex;
+	strncpy(str, _str, 18);
+	str[17] = 0;
+	byte count=0;
+	hex = strtok(str, ":");
+	mac[count] = hex2dec(hex);
+	count++;
+	while(true) {
+		hex = strtok(NULL, ":");
+		if(hex==NULL) break;
+		mac[count++] = hex2dec(hex);
+		yield();
+	}
+}
+#endif

@@ -18,7 +18,7 @@
  *
  * You should have received a copy of the GNU General Public License
  * along with this program.  If not, see
- * <http://www.gnu.org/licenses/>. 
+ * <http://www.gnu.org/licenses/>.
  */
 
 #include <stdlib.h>
@@ -32,6 +32,7 @@ extern char tmp_buffer[];
 extern char ether_buffer[];
 char wt_rawData[TMP_BUFFER_SIZE];
 int wt_errCode = HTTP_RQT_NOT_RECEIVED;
+byte wt_monthly[12] = {100,100,100,100,100,100,100,100,100,100,100,100};
 
 byte findKeyVal (const char *str,char *strbuf, uint16_t maxlen,const char *key,bool key_in_pgm=false,uint8_t *keyfound=NULL);
 void write_log(byte type, ulong curr_time);
@@ -55,7 +56,7 @@ static void getweather_callback(char* buffer) {
 		wt_errCode = atoi(tmp_buffer);
 		if(wt_errCode==0) os.checkwt_success_lasttime = os.now_tz();
 	}
-	
+
 	// then only parse scale if errCode is 0
 	if (wt_errCode==0 && findKeyVal(p, tmp_buffer, TMP_BUFFER_SIZE, PSTR("scale"), true)) {
 		v = atoi(tmp_buffer);
@@ -63,10 +64,10 @@ static void getweather_callback(char* buffer) {
 			// only save if the value has changed
 			os.iopts[IOPT_WATER_PERCENTAGE] = v;
 			os.iopts_save();
-			os.weather_update_flag |= WEATHER_UPDATE_WL;			
+			os.weather_update_flag |= WEATHER_UPDATE_WL;
 		}
-	}	
-		
+	}
+
 	if (findKeyVal(p, tmp_buffer, TMP_BUFFER_SIZE, PSTR("sunrise"), true)) {
 		v = atoi(tmp_buffer);
 		if (v>=0 && v<=1440 && v != os.nvdata.sunrise_time) {
@@ -80,8 +81,8 @@ static void getweather_callback(char* buffer) {
 		v = atoi(tmp_buffer);
 		if (v>=0 && v<=1440 && v != os.nvdata.sunset_time) {
 			os.nvdata.sunset_time = v;
-			save_nvdata = true;			
-			os.weather_update_flag |= WEATHER_UPDATE_SUNSET;			
+			save_nvdata = true;
+			os.weather_update_flag |= WEATHER_UPDATE_SUNSET;
 		}
 	}
 
@@ -89,11 +90,11 @@ static void getweather_callback(char* buffer) {
 		uint32_t l = strtoul(tmp_buffer, NULL, 0);
 		if(l != os.nvdata.external_ip) {
 			os.nvdata.external_ip = l;
-			save_nvdata = true;			
+			save_nvdata = true;
 			os.weather_update_flag |= WEATHER_UPDATE_EIP;
 		}
 	}
-	
+
 	if (findKeyVal(p, tmp_buffer, TMP_BUFFER_SIZE, PSTR("tz"), true)) {
 		v = atoi(tmp_buffer);
 		if (v>=0 && v<= 108) {
@@ -105,7 +106,7 @@ static void getweather_callback(char* buffer) {
 			}
 		}
 	}
-	
+
 	if (findKeyVal(p, tmp_buffer, TMP_BUFFER_SIZE, PSTR("rd"), true)) {
 		v = atoi(tmp_buffer);
 		if (v>0) {
@@ -117,9 +118,9 @@ static void getweather_callback(char* buffer) {
 	}
 
 	if (findKeyVal(p, wt_rawData, TMP_BUFFER_SIZE, PSTR("rawData"), true)) {
-		wt_rawData[TMP_BUFFER_SIZE-1]=0;	// make sure the buffer ends properly
+		wt_rawData[TMP_BUFFER_SIZE-1]=0;  // make sure the buffer ends properly
 	}
-	
+
 	if(save_nvdata) os.nvdata_save();
 	write_log(LOGDATA_WATERLEVEL, os.checkwt_success_lasttime);
 }
@@ -131,25 +132,27 @@ static void getweather_callback_with_peel_header(char* buffer) {
 
 void GetWeather() {
 #if defined(ESP8266)
-	if(!m_server) {
+	if (!useEth)
 		if (os.state!=OS_STATE_CONNECTED || WiFi.status()!=WL_CONNECTED) return;
-	}
 #endif
 	// use temp buffer to construct get command
 	BufferFiller bf = tmp_buffer;
+	int method = os.iopts[IOPT_USE_WEATHER];
+	// use manual adjustment call for monthly adjustment -- a bit ugly, but does not involve weather server changes
+	if(method==WEATHER_METHOD_MONTHLY) method=WEATHER_METHOD_MANUAL;
 	bf.emit_p(PSTR("$D?loc=$O&wto=$O&fwv=$D"),
-								(int) os.iopts[IOPT_USE_WEATHER],
+								method,
 								SOPT_LOCATION,
 								SOPT_WEATHER_OPTS,
 								(int)os.iopts[IOPT_FW_VERSION]);
 
 	char *src=tmp_buffer+strlen(tmp_buffer);
 	char *dst=tmp_buffer+TMP_BUFFER_SIZE-12;
-	
+
 	char c;
 	// url encode. convert SPACE to %20
 	// copy reversely from the end because we are potentially expanding
-	// the string size 
+	// the string size
 	while(src!=tmp_buffer) {
 		c = *src--;
 		if(c==' ') {
@@ -165,7 +168,7 @@ void GetWeather() {
 	strcpy(ether_buffer, "GET /");
 	strcat(ether_buffer, dst);
 	// because dst is part of tmp_buffer,
-	// must load weather url AFTER dst is copied to ether_buffer	
+	// must load weather url AFTER dst is copied to ether_buffer
 
 	// load weather url to tmp_buffer
 	char *host = tmp_buffer;
@@ -181,4 +184,33 @@ void GetWeather() {
 		if(wt_errCode < 0) wt_errCode = ret;
 		// if wt_errCode > 0, the call is successful but weather script may return error
 	}
+}
+
+void load_wt_monthly(char* wto) {
+	byte i;
+	int p[12];
+	for(i=0;i<12;i++) p[i]=100; // init all to 100
+	sscanf(wto, "\"scales\":[%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d]", p,p+1,p+2,p+3,p+4,p+5,p+6,p+7,p+8,p+9,p+10,p+11);
+	for(i=0;i<12;i++) {
+		if(p[i]<0) p[i]=0;
+		if(p[i]>250) p[i]=250;
+		wt_monthly[i]=p[i];
+	}
+}
+
+void apply_monthly_adjustment(ulong curr_time) {
+		// ====== Check monthly water percentage ======
+		if(os.iopts[IOPT_USE_WEATHER]==WEATHER_METHOD_MONTHLY) {
+#if defined(ARDUINO)
+			byte m = month(curr_time)-1;
+#else
+			time_t ct = curr_time;
+			struct tm *ti = gmtime(&ct);
+			byte m = ti->tm_mon;  // tm_mon ranges from [0,11]
+#endif
+			if(os.iopts[IOPT_WATER_PERCENTAGE]!=wt_monthly[m]) {
+				os.iopts[IOPT_WATER_PERCENTAGE]=wt_monthly[m];
+				os.iopts_save();
+			}
+		}
 }

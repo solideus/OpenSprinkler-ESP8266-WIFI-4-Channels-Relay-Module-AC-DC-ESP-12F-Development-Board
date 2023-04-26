@@ -39,10 +39,6 @@ Changed SSD1306Display.h "Wire.setClock(100000L)" due to incompatibility with RT
 
 I haven't tested with sensors and other components. 
 
-vampywiz17: 
-
-I updated all affected files to 2.1.9(11) version. it is a minor changes. 2.1.9(11) the last version, that easy to update use with ESP boards. with 2.2.0 is to much changes, that i able to rewrite it. I hope somebody will do this in the future.
-
 StudioShemp:
 I've extended on the excellent work of solideus and vampwiz17 to create a working (tested) 2.2.0(1) release. This includes an option to change the date format of the OLED to DD-MM in defines.h for those of us who find the US date format a little irksome. I've also created a 'define' in defines.h to flag the use of the ESP12F_RELAY_X4 board, and altered the code in main.cpp, OpenSprinkler.cpp and defines.h to run standard 2.2.0(1) or the version for this board depending on the value of that flag in defines.h. All sections of code using the flag as a condition are commented with /**ESP12F_RELAY_X4... */ to make maintaining easier for new releases
 
@@ -55,11 +51,13 @@ For this version (2.2.x) you will need to:
 See release notes for 2.2.0(1) at https://github.com/OpenSprinkler/OpenSprinkler-Firmware/releases/tag/220(1) 
 
 
+
 Suggestions are welcome
 
 Credits: Thanks to the forum user Tobasco
 https://opensprinkler.com/forums/topic/change-firmware-to-control-stations-directly-via-gpio-pins-relays/
 
+Also see additional tips from Tobasco at https://github.com/ThFischer/OpenSprinkler-for-ESP12F_Relay_X4 who provided foundational work on the use of this board. His repo includes tips on adding an external antenna, alterations to the DS1307 RTC for use with 3.3v and adding a relay protecting 'snubber' circuit if switching mains AC. 
 
 
 ============================================

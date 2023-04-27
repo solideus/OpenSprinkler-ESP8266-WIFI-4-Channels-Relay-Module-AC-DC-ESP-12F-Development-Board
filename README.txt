@@ -40,7 +40,7 @@ Changed SSD1306Display.h "Wire.setClock(100000L)" due to incompatibility with RT
 I haven't tested with sensors and other components. 
 
 StudioShemp:
-I've extended on the excellent work of thFischer, solideus and vampwiz17 to create a working (tested) 2.2.0(1) release. This includes an option to change the date format of the OLED to DD-MM in defines.h for those of us who find the US date format a little irksome. I've also created a 'define' in defines.h to flag the use of the ESP12F_RELAY_X4 board, and altered the code in main.cpp, OpenSprinkler.cpp and defines.h to run standard 2.2.0(1) or the version for this board depending on the value of that flag in defines.h. All sections of code using the flag as a condition are commented with /**ESP12F_RELAY_X4... */ to make maintaining easier for new releases
+I've extended on the excellent work of ThFischer, solideus and vampwiz17 to create a working (tested) 2.2.0(1) release. This includes an option to change the date format of the OLED to DD-MM in defines.h for those of us who find the US date format a little irksome. I've also created a 'define' in defines.h to flag the use of the ESP12F_RELAY_X4 board, and altered the code in main.cpp, OpenSprinkler.cpp and defines.h to run standard 2.2.0(1) or the version for this board depending on the value of that flag in defines.h. All sections of code using the flag as a condition are commented with /**ESP12F_RELAY_X4... */ to make maintaining easier for new releases
 
 For this version (2.2.x) you will need to:
  - manually install the OpenThings-Framework-Firmware-Library into your Arduino IDE's library folder 

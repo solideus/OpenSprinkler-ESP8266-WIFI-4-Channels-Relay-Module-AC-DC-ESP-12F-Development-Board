@@ -52,7 +52,7 @@ For this version (2.2.x) you will need to:
 
 See release notes for 2.2.0(1) at https://github.com/OpenSprinkler/OpenSprinkler-Firmware/releases/tag/220(1) 
 
-![ESP12F_Relay_X4](https://github.com/StudioShemp/OpenSprinkler-ESP8266-WIFI-4-Channels-Relay-Module-AC-DC-ESP-12F-Development-Board/blob/master/images/OpenSprinkler220.jpg) 
+![Built](https://github.com/StudioShemp/OpenSprinkler-ESP8266-WIFI-4-Channels-Relay-Module-AC-DC-ESP-12F-Development-Board/blob/master/images/OpenSprinkler220.jpg) 
 
 Suggestions are welcome
 

@@ -17,6 +17,8 @@ This modification with respect to the original is capable of controlling the rel
 
 Model: ESP8266-WIFI-4-Channels-Relay-Module-AC-DC-ESP-12F-Development-Board
 
+![ESP12F_Relay_X4](OpenSprinkler-ESP8266-WIFI-4-Channels-Relay-Module-AC-DC-ESP-12F-Development-Board/blob/master/images/ESP12F_Relay_X4.jpg) 
+
 Probably the cheapest board on which you will be able to mount OpenSprinkler
 
 The lines on the RTC module have been recovered. Now with update 2.1.9 (9) It is only updated if the module exists.
@@ -50,7 +52,7 @@ For this version (2.2.x) you will need to:
 
 See release notes for 2.2.0(1) at https://github.com/OpenSprinkler/OpenSprinkler-Firmware/releases/tag/220(1) 
 
-
+![ESP12F_Relay_X4](OpenSprinkler-ESP8266-WIFI-4-Channels-Relay-Module-AC-DC-ESP-12F-Development-Board/blob/master/images/OpenSprinkler220.jpg) 
 
 Suggestions are welcome
 

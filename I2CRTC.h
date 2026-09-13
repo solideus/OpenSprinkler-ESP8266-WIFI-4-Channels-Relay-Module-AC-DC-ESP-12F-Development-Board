@@ -4,13 +4,13 @@
  */
 
 
-#ifndef I2CRTC_h
-#define I2CRTC_h
+#pragma once
 
 #define DS1307_ADDR  0x68
 #define MCP7940_ADDR 0x6F
 #define PCF8563_ADDR 0x51
 
+#include "types.h"
 #include "TimeLib.h"
 
 // library interface description
@@ -19,8 +19,8 @@ class I2CRTC
 	// user-accessible "public" interface
 	public:
 	I2CRTC();
-	static time_t get();
-	static void set(time_t t);
+	static time_os_t get();
+	static void set(time_os_t t);
 	static void read(tmElements_t &tm);
 	static void write(tmElements_t &tm);
 	static bool detect();
@@ -34,5 +34,3 @@ class I2CRTC
 
 extern I2CRTC RTC;
 
-#endif
- 

@@ -1,4 +1,4 @@
-/* OpenSprinkler Unified (AVR/RPI/BBB/LINUX) Firmware
+/* OpenSprinkler Unified Firmware
  * Copyright (C) 2015 by Ray Wang (ray@opensprinkler.com)
  *
  * GPIO header file
@@ -21,12 +21,9 @@
  * <http://www.gnu.org/licenses/>.
  */
 
-#ifndef GPIO_H
-#define GPIO_H
+#pragma once
 
 #if defined(ARDUINO)
-
-#if defined(ESP8266)
 
 #include "Arduino.h"
 
@@ -45,6 +42,7 @@
 class IOEXP {
 public:
 	IOEXP(uint8_t addr=255) { address = addr; type = IOEXP_TYPE_NONEXIST; }
+	virtual ~IOEXP() {}
 
 	virtual void pinMode(uint8_t pin, uint8_t IOMode) { }
 	virtual uint16_t i2c_read(uint8_t reg) { return 0xFFFF; }
@@ -71,7 +69,7 @@ public:
 		i2c_write(NXP_OUTPUT_REG, values);
 	}
 
-	static byte detectType(uint8_t address);
+	static unsigned char detectType(uint8_t address);
 	uint8_t address;
 	uint8_t type;
 };
@@ -109,11 +107,9 @@ private:
 	uint8_t inputmask = 0;	// mask bits for input pins
 };
 
-void pinModeExt(byte pin, byte mode);
-void digitalWriteExt(byte pin, byte value);
-byte digitalReadExt(byte pin);
-
-#endif	// ESP8266
+void pinModeExt(unsigned char pin, unsigned char mode);
+void digitalWriteExt(unsigned char pin, unsigned char value);
+unsigned char digitalReadExt(unsigned char pin);
 
 #else
 
@@ -134,15 +130,14 @@ byte digitalReadExt(byte pin);
 #define HIGH   1
 #define LOW    0
 
-void pinMode(int pin, byte mode);
-void digitalWrite(int pin, byte value);
+void pinMode(int pin, unsigned char mode);
+void digitalWrite(int pin, unsigned char value);
 int gpio_fd_open(int pin, int mode = O_WRONLY);
 void gpio_fd_close(int fd);
-void gpio_write(int fd, byte value);
-byte digitalRead(int pin);
+void gpio_write(int fd, unsigned char value);
+unsigned char digitalRead(int pin);
 // mode can be any of 'rising', 'falling', 'both'
 void attachInterrupt(int pin, const char* mode, void (*isr)(void));
 
 #endif
 
-#endif // GPIO_H

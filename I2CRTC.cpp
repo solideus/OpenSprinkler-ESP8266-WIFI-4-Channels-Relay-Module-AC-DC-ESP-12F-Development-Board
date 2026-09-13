@@ -24,9 +24,6 @@
 	23 Dec 2013 -- modified by Ray Wang (Rayshobby LLC) to add support for MCP7940
  */
 
-
-#if defined(ARDUINO)
-
 #include "I2CRTC.h"
 #include <Wire.h>
 
@@ -58,14 +55,14 @@ bool I2CRTC::detect()
 }
 
 // PUBLIC FUNCTIONS
-time_t I2CRTC::get() // Aquire data from buffer and convert to time_t
+time_os_t I2CRTC::get() // Aquire data from buffer and convert to time_os_t
 {
 	tmElements_t tm;
 	read(tm);
 	return(makeTime(tm));
 }
 
-void I2CRTC::set(time_t t)
+void I2CRTC::set(time_os_t t)
 {
 	tmElements_t tm;
 	breakTime(t, tm);
@@ -159,5 +156,3 @@ uint8_t I2CRTC::bcd2dec(uint8_t num)
 }
 
 I2CRTC RTC = I2CRTC(); // create an instance for the user
-
-#endif

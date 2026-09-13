@@ -1,4 +1,4 @@
-/* OpenSprinkler Unified (AVR/RPI/BBB/LINUX) Firmware
+/* OpenSprinkler Unified Firmware
  * Copyright (C) 2015 by Ray Wang (ray@opensprinkler.com)
  *
  * Program data structures and functions
@@ -23,6 +23,7 @@
 
 #include <limits.h>
 #include "program.h"
+#include "main.h"
 
 #if !defined(SECS_PER_DAY)
 #define SECS_PER_MIN  (60UL)
@@ -31,12 +32,12 @@
 #endif
 
 // Declare static data members
-byte ProgramData::nprograms = 0;
-byte ProgramData::nqueue = 0;
+unsigned char ProgramData::nprograms = 0;
+unsigned char ProgramData::nqueue = 0;
 RuntimeQueueStruct ProgramData::queue[RUNTIME_QUEUE_SIZE];
-byte ProgramData::station_qid[MAX_NUM_STATIONS];
+unsigned char ProgramData::station_qid[MAX_NUM_STATIONS];
 LogStruct ProgramData::lastrun;
-ulong ProgramData::last_seq_stop_times[NUM_SEQ_GROUPS];
+time_os_t ProgramData::last_seq_stop_times[NUM_SEQ_GROUPS];
 
 extern char tmp_buffer[];
 
@@ -70,7 +71,7 @@ RuntimeQueueStruct* ProgramData::enqueue() {
  * element, therefore removing the requested element.
  */
 // this removes an element from the queue
-void ProgramData::dequeue(byte qid) {
+void ProgramData::dequeue(unsigned char qid) {
 	if (qid>=nqueue)	return;
 	if (qid<nqueue-1) {
 		queue[qid] = queue[nqueue-1]; // copy the last element to the dequeud element to fill the space
@@ -97,35 +98,42 @@ void ProgramData::eraseall() {
 }
 
 /** Read a program from program file*/
-void ProgramData::read(byte pid, ProgramStruct *buf) {
+void ProgramData::read(unsigned char pid, ProgramStruct *buf) {
 	if (pid >= nprograms) return;
-	// first byte is program counter, so 1+
-	file_read_block(PROG_FILENAME, buf, 1+(ulong)pid*PROGRAMSTRUCT_SIZE, PROGRAMSTRUCT_SIZE);
+	// first unsigned char is program counter, so 1+
+	file_read_block(PROG_FILENAME, buf, 1+(uint32_t)pid*PROGRAMSTRUCT_SIZE, PROGRAMSTRUCT_SIZE);
 }
 
 /** Add a program */
-byte ProgramData::add(ProgramStruct *buf) {
+unsigned char ProgramData::add(ProgramStruct *buf, SensorAdjustment *adj) {
 	if (nprograms >= MAX_NUM_PROGRAMS)	return 0;
-	file_write_block(PROG_FILENAME, buf, 1+(ulong)nprograms*PROGRAMSTRUCT_SIZE, PROGRAMSTRUCT_SIZE);
-	nprograms ++;
+	file_write_block(PROG_FILENAME, buf, 1+(uint32_t)nprograms*PROGRAMSTRUCT_SIZE, PROGRAMSTRUCT_SIZE);
+	if (adj) SensorAdjustment::write(adj, nprograms);
+	nprograms++;
 	save_count();
 	return 1;
 }
 
 /** Move a program up (i.e. swap a program with the one above it) */
-void ProgramData::moveup(byte pid) {
+void ProgramData::moveup(unsigned char pid) {
 	if(pid >= nprograms || pid == 0) return;
 	// swap program pid-1 and pid
-	ulong pos = 1+(ulong)(pid-1)*PROGRAMSTRUCT_SIZE;
-	ulong next = pos+PROGRAMSTRUCT_SIZE;
+	uint32_t pos = 1+(uint32_t)(pid-1)*PROGRAMSTRUCT_SIZE;
+	uint32_t next = pos+PROGRAMSTRUCT_SIZE;
 	char buf2[PROGRAMSTRUCT_SIZE];
 	file_read_block(PROG_FILENAME, tmp_buffer, pos, PROGRAMSTRUCT_SIZE);
 	file_read_block(PROG_FILENAME, buf2, next, PROGRAMSTRUCT_SIZE);
 	file_write_block(PROG_FILENAME, tmp_buffer, next, PROGRAMSTRUCT_SIZE);
 	file_write_block(PROG_FILENAME, buf2, pos, PROGRAMSTRUCT_SIZE);
+	// swap senadj entries for pid-1 and pid to match the program swap
+	char buf3[SENSOR_ADJUSTMENT_SIZE];
+	file_read_block(SENADJ_FILENAME, tmp_buffer, SENSOR_ADJUSTMENT_SIZE * (pid-1), SENSOR_ADJUSTMENT_SIZE);
+	file_read_block(SENADJ_FILENAME, buf3, SENSOR_ADJUSTMENT_SIZE * pid, SENSOR_ADJUSTMENT_SIZE);
+	file_write_block(SENADJ_FILENAME, buf3, SENSOR_ADJUSTMENT_SIZE * (pid-1), SENSOR_ADJUSTMENT_SIZE);
+	file_write_block(SENADJ_FILENAME, tmp_buffer, SENSOR_ADJUSTMENT_SIZE * pid, SENSOR_ADJUSTMENT_SIZE);
 }
 
-void ProgramData::toggle_pause(ulong delay) {
+void ProgramData::toggle_pause(uint32_t delay) {
 	if (os.status.pause_state) { // was paused
 		resume_stations();
 	} else {
@@ -136,11 +144,9 @@ void ProgramData::toggle_pause(ulong delay) {
 	os.status.pause_state = !os.status.pause_state;
 }
 
-void turn_off_station(byte sid, ulong curr_time, byte shift=0);
-
 void ProgramData::set_pause() {
 	RuntimeQueueStruct *q = queue;
-	ulong curr_t = os.now_tz();
+	time_os_t curr_t = os.now_tz();
 
 	for (; q < queue + nqueue; q++) {
 
@@ -154,9 +160,11 @@ void ProgramData::set_pause() {
 			q->st += os.pause_timer;
 		}
 		q->deque_time += os.pause_timer;
-		byte gid = os.get_station_gid(q->sid);
-		if (q->st + q->dur > last_seq_stop_times[gid]) {
-			last_seq_stop_times[gid] = q->st + q->dur; // update last_seq_stop_times of the corresponding group
+		if (os.is_sequential_station(q->sid) && !os.iopts[IOPT_REMOTE_EXT_MODE]) {
+			unsigned char gid = os.get_station_gid(q->sid);
+			if (q->st + q->dur > last_seq_stop_times[gid]) {
+				last_seq_stop_times[gid] = q->st + q->dur; // update last_seq_stop_times of the corresponding group
+			}
 		}
 	}
 }
@@ -179,21 +187,25 @@ void ProgramData::clear_pause() {
 }
 
 /** Modify a program */
-byte ProgramData::modify(byte pid, ProgramStruct *buf) {
+unsigned char ProgramData::modify(unsigned char pid, ProgramStruct *buf, SensorAdjustment *adj) {
 	if (pid >= nprograms)  return 0;
-	ulong pos = 1+(ulong)pid*PROGRAMSTRUCT_SIZE;
+	uint32_t pos = 1+(uint32_t)pid*PROGRAMSTRUCT_SIZE;
 	file_write_block(PROG_FILENAME, buf, pos, PROGRAMSTRUCT_SIZE);
+	if (adj) SensorAdjustment::write(adj, pid);
 	return 1;
 }
 
 /** Delete program(s) */
-byte ProgramData::del(byte pid) {
+unsigned char ProgramData::del(unsigned char pid) {
 	if (pid >= nprograms)  return 0;
 	if (nprograms == 0) return 0;
-	ulong pos = 1+(ulong)(pid+1)*PROGRAMSTRUCT_SIZE;
+	uint32_t pos = 1+(uint32_t)(pid+1)*PROGRAMSTRUCT_SIZE;
 	// erase by copying backward
-	for (; pos < 1+(ulong)nprograms*PROGRAMSTRUCT_SIZE; pos+=PROGRAMSTRUCT_SIZE) {
+	for (; pos < 1+(uint32_t)nprograms*PROGRAMSTRUCT_SIZE; pos+=PROGRAMSTRUCT_SIZE) {
 		file_copy_block(PROG_FILENAME, pos, pos-PROGRAMSTRUCT_SIZE, PROGRAMSTRUCT_SIZE, tmp_buffer);
+	}
+	for (int i = pid; i < nprograms-1; i++) {
+		file_copy_block(SENADJ_FILENAME, SENSOR_ADJUSTMENT_SIZE * (i+1), SENSOR_ADJUSTMENT_SIZE * i, SENSOR_ADJUSTMENT_SIZE, tmp_buffer);
 	}
 	nprograms --;
 	save_count();
@@ -201,12 +213,12 @@ byte ProgramData::del(byte pid) {
 }
 
 // set the enable bit
-byte ProgramData::set_flagbit(byte pid, byte bid, byte value) {
+unsigned char ProgramData::set_flagbit(unsigned char pid, unsigned char bid, unsigned char value) {
 	if (pid >= nprograms)  return 0;
-	byte flag = file_read_byte(PROG_FILENAME, 1+(ulong)pid*PROGRAMSTRUCT_SIZE);
+	unsigned char flag = file_read_byte(PROG_FILENAME, 1+(uint32_t)pid*PROGRAMSTRUCT_SIZE);
 	if(value) flag|=(1<<bid);
 	else flag&=(~(1<<bid));
-	file_write_byte(PROG_FILENAME, 1+(ulong)pid*PROGRAMSTRUCT_SIZE, flag);
+	file_write_byte(PROG_FILENAME, 1+(uint32_t)pid*PROGRAMSTRUCT_SIZE, flag);
 	return 1;
 }
 
@@ -226,22 +238,25 @@ int16_t ProgramStruct::starttime_decode(int16_t t) {
 }
 
 /** Check if a given time matches the program's start day */
-byte ProgramStruct::check_day_match(time_t t) {
+unsigned char ProgramStruct::check_day_match(time_os_t t) {
 
-#if defined(ARDUINO)  // get current time from Arduino
-	byte weekday_t = weekday(t);  // weekday ranges from [0,6] within Sunday being 1
-	byte day_t = day(t);
-	byte month_t = month(t);
-#else // get current time from RPI/BBB
-	time_t ct = t;
-	struct tm *ti = gmtime(&ct);
-	byte weekday_t = (ti->tm_wday+1)%7;  // tm_wday ranges from [0,6] with Sunday being 0
-	byte day_t = ti->tm_mday;
-	byte month_t = ti->tm_mon+1;  // tm_mon ranges from [0,11]
+#if defined(ESP8266)  // get current time from Arduino
+	unsigned char weekday_t = weekday(t);  // weekday ranges from [0,6] within Sunday being 1
+	unsigned char day_t = day(t);
+	unsigned char month_t = month(t);
+	unsigned char year_t = year(t);
+#else // get current time from RPI/LINUX
+	time_t _ct = t;
+	struct tm *ti = gmtime(&_ct);
+	unsigned char weekday_t = (ti->tm_wday+1)%7;  // tm_wday ranges from [0,6] with Sunday being 0
+	unsigned char day_t = ti->tm_mday;
+	unsigned char month_t = ti->tm_mon+1;  // tm_mon ranges from [0,11]
+	unsigned char year_t = ti->tm_year+1900; // tm_year is years since 1900
 #endif // get current time
 
-	byte wd = (weekday_t+5)%7;
-	byte dt = day_t;
+	int epoch_t = (t / 86400);
+	unsigned char wd = (weekday_t+5)%7;
+	unsigned char dt = day_t;
 
 	if(en_daterange) { // check date range if enabled
 		int16_t currdate = date_encode(month_t, day_t);
@@ -262,13 +277,26 @@ byte ProgramStruct::check_day_match(time_t t) {
 				return 0;
 		break;
 
-		case PROGRAM_TYPE_BIWEEKLY:
-			// todo future
+		case PROGRAM_TYPE_SINGLERUN:
+			// check match of exact day
+			if(((days[0] << 8) + days[1]) != epoch_t)
+				return 0;
 		break;
 
 		case PROGRAM_TYPE_MONTHLY:
-			if (dt != (days[0]&0b11111))
+			if ((days[0]&0b11111) == 0) {
+				if(month_t == 2){
+					if((isLeapYear(year_t) && dt != 29) || (!isLeapYear(year_t) && dt != 28)){
+						return 0;
+					}
+				}else{
+					if(!isLastDayofMonth(month_t, dt))
+						return 0;
+				}
+			} else if (dt != (days[0]&0b11111)){
 				return 0;
+			}
+
 		break;
 
 		case PROGRAM_TYPE_INTERVAL:
@@ -295,7 +323,9 @@ byte ProgramStruct::check_day_match(time_t t) {
 // Check if a given time matches program's start time
 // this also checks for programs that started the previous
 // day and ran over night
-byte ProgramStruct::check_match(time_t t) {
+// Return value: 0 if no match; otherwise return the n-th count of the match.
+// For example, if this is the first-run of the day, return 1 etc.
+unsigned char ProgramStruct::check_match(time_os_t t, bool *to_delete) {
 
 	// check program enable status
 	if (!enabled) return 0;
@@ -311,21 +341,49 @@ byte ProgramStruct::check_match(time_t t) {
 
 		if (starttime_type) {
 			// given start time type
-			for(byte i=0;i<MAX_NUM_STARTTIMES;i++) {
-				if (current_minute == starttime_decode(starttimes[i]))	return 1; // if curren_minute matches any of the given start time, return 1
+			unsigned char maxStartTime = -1;
+			for(unsigned char i=0;i<MAX_NUM_STARTTIMES;i++) {
+				if (starttime_decode(starttimes[i]) > maxStartTime){
+					maxStartTime = starttime_decode(starttimes[i]);
+				}
+			}
+			for(unsigned char i=0;i<MAX_NUM_STARTTIMES;i++) {
+				//if curr = largest start time and the program is run once --> delete
+				if (current_minute == starttime_decode(starttimes[i])){
+					if(maxStartTime == current_minute && type == PROGRAM_TYPE_SINGLERUN){
+						*to_delete = true;
+					}else{
+						*to_delete = false;
+					}
+					return (i+1); // if curren_minute matches any of the given start time, return matched index + 1
+				}
 			}
 			return 0; // otherwise return 0
 		} else {
 			// repeating type
 			// if current_minute matches start time, return 1
-			if (current_minute == start) return 1;
+			// if also no interval and run once --> delete
+			if (current_minute == start){
+				if(!interval && type == PROGRAM_TYPE_SINGLERUN){
+					*to_delete = true;
+				}else{
+					*to_delete = false;
+				}
+				return 1;
+			}
 
 			// otherwise, current_minute must be larger than start time, and interval must be non-zero
 			if (current_minute > start && interval) {
 				// check if we are on any interval match
 				int16_t c = (current_minute - start) / interval;
 				if ((c * interval == (current_minute - start)) && c <= repeat) {
-					return 1;
+					//if c == repeat (final repeat) and program is run-once --> delete
+					if(c == repeat && type == PROGRAM_TYPE_SINGLERUN){
+						*to_delete = true;
+					}else{
+						*to_delete = false;
+					}
+					return (c+1);  // return match count n
 				}
 			}
 		}
@@ -338,25 +396,119 @@ byte ProgramStruct::check_match(time_t t) {
 		// t-86400L matches the program's start day
 		int16_t c = (current_minute - start + 1440) / interval;
 		if ((c * interval == (current_minute - start + 1440)) && c <= repeat) {
-			return 1;
+			//if c == repeat (final repeat) and program is run-once --> delete
+			if(c == repeat && type == PROGRAM_TYPE_SINGLERUN){
+				*to_delete = true;
+			}else{
+				*to_delete = false;
+			}
+			return (c+1);  // return the match count n
 		}
 	}
 	return 0;
 }
 
+struct StationNameSortElem {
+	unsigned char idx;
+	char *name;
+};
+
+int StationNameSortAscendCmp(const void *a, const void *b) {
+	return strcmp(((StationNameSortElem*)a)->name,((StationNameSortElem*)b)->name);
+}
+
+int StationNameSortDescendCmp(const void *a, const void *b) {
+	return StationNameSortAscendCmp(b, a);
+}
+
+// generate station runorder based on the annotation in program names
+// alternating means on the odd numbered runs of the program, it uses one order; on the even runs, it uses the opposite order
+void ProgramStruct::gen_station_runorder(uint16_t runcount, unsigned char *order) {
+	unsigned char len = strlen(name);
+	unsigned char ns = os.nstations;
+	int16_t i;
+	unsigned char temp;
+
+	// default order: ascending by index
+	for(i=0;i<ns;i++) {
+		order[i] = i;
+	}
+
+	// check matches with program name annotation
+	if(len>=2 && name[len-2]=='>') {
+		char anno = name[len-1];
+		switch(anno) {
+			case 'I':	// descending by index
+			case 'a': // alternating: odd-numbered runs ascending by index, even-numbered runs descending.
+			case 'A': // odd-numbered runs descending by index, even-numbered runs ascending
+			{
+				if((anno=='I') || ((anno=='a') && (runcount%2==0)) || ((anno=='A') && (runcount%2==1)))  {
+					// reverse the order
+					for(i=0;i<ns;i++) {
+						order[i] = ns-1-i;
+					}
+				}
+			}
+			break;
+
+			case 'n': // ascending by name
+			case 'N': // descending by name
+			case 't': // alternating: odd-numbered runs ascending by name, even-numbered runs descending.
+			case 'T': // odd-numbered runs descending by name, even-numbered runs ascending
+			{
+				StationNameSortElem elems[ns];
+				for(i=0;i<ns;i++) {
+					elems[i].idx=i;
+					os.get_station_name(i,tmp_buffer);
+					elems[i].name=strdup(tmp_buffer);
+				}
+				if((anno=='n') || ((anno=='t') && (runcount%2==1)) || ((anno=='T') && (runcount%2==0))) {
+					qsort(elems, ns, sizeof(StationNameSortElem), StationNameSortAscendCmp);
+				} else {
+					qsort(elems, ns, sizeof(StationNameSortElem), StationNameSortDescendCmp);
+				}
+				for(i=0;i<ns;i++) {
+					order[i]=elems[i].idx;
+					free(elems[i].name);
+				}
+			}
+			break;
+
+			case 'r': // random ordering
+			case 'R': // random ordering
+
+			{
+				for(i=0;i<ns-1;i++) {
+					unsigned char sel = (rand()%(ns-i))+i;
+					temp = order[i]; // swap order[i] with order[sel]
+					order[i] = order[sel];
+					order[sel] = temp;
+				}
+			}
+			break;
+		}
+	}
+#if defined(ENABLE_DEBUG)
+	DEBUG_PRINT("station order:[");
+	for(i=0;i<ns;i++) {
+		DEBUG_PRINT(order[i]);
+		DEBUG_PRINT(",");
+	}
+	DEBUG_PRINTLN("]");
+#endif
+}
+
 // convert absolute remainder (reference time 1970 01-01) to relative remainder (reference time today)
 // absolute remainder is stored in flash, relative remainder is presented to web
-void ProgramData::drem_to_relative(byte days[2]) {
-	byte rem_abs=days[0];
-	byte inv=days[1];
-	// todo future: use now_tz()?
-	days[0] = (byte)((rem_abs + inv - (os.now_tz()/SECS_PER_DAY) % inv) % inv);
+void ProgramData::drem_to_relative(unsigned char days[2]) {
+	unsigned char rem_abs=days[0];
+	unsigned char inv=days[1];
+days[0] = (unsigned char)((rem_abs + inv - (os.now_tz()/SECS_PER_DAY) % inv) % inv);
 }
 
 // relative remainder -> absolute remainder
-void ProgramData::drem_to_absolute(byte days[2]) {
-	byte rem_rel=days[0];
-	byte inv=days[1];
-	// todo future: use now_tz()?
-	days[0] = (byte)(((os.now_tz()/SECS_PER_DAY) + rem_rel) % inv);
+void ProgramData::drem_to_absolute(unsigned char days[2]) {
+	unsigned char rem_rel=days[0];
+	unsigned char inv=days[1];
+	days[0] = (unsigned char)(((os.now_tz()/SECS_PER_DAY) + rem_rel) % inv);
 }

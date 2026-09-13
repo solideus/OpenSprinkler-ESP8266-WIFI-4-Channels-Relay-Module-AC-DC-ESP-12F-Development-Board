@@ -1,0 +1,49 @@
+name: Build ESP8266 four-relay firmware
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master, esp8266-4ch-relay-2215]
+    paths-ignore:
+      - "**.md"
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install PlatformIO
+        run: pip install platformio==6.2.0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install HTML compressor
+        run: npm install html-minifier-terser
+
+      - name: Compile custom firmware
+        run: pio run --environment esp8266_4ch_relay
+
+      - name: Name firmware file
+        run: cp .pio/build/esp8266_4ch_relay/firmware.bin OpenSprinkler-2215-ESP8266-4CH.bin
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: OpenSprinkler-2215-ESP8266-4CH
+          path: OpenSprinkler-2215-ESP8266-4CH.bin
+          if-no-files-found: error

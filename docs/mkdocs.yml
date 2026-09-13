@@ -1,0 +1,30 @@
+site_name: OpenSprinkler Documentation
+site_url: https://OpenSprinkler.github.io/OpenSprinkler-Firmware/
+repo_url: https://github.com/OpenSprinkler/OpenSprinkler-Firmware
+
+theme: readthedocs
+
+nav:
+  - 'Home': 'index.md'
+  - 'FAQ':  'faq.md'
+  - 'Troubleshooting': 'troubleshooting.md'
+  - 'Firmware Update': 'firmware-update.md'
+  - 'Firmware v2.2.1(5) [NEW]':
+    - 'User Manual': '2.2.1/221_5_manual.md'
+    - 'API Reference': '2.2.1/221_5_api.md'
+  - 'Firmware v2.2.1(4)':
+    - 'User Manual': '2.2.1/221_4_manual.md'
+    - 'API Reference': '2.2.1/221_4_api.md'
+  - 'Zone Expander':
+    - 'User Manual': 'zone-expander.md'
+  - 'Sensor Expander [NEW]':
+    - 'User Manual': 'sensor-expander.md'
+  - 'Archived':
+    - 'Previous Manuals and API docs': 'archive.md'
+extra_css:
+  - custom.css
+extra_javascript:
+  - js/nav_badges.js
+markdown_extensions:
+  - attr_list
+  - admonition

@@ -1,4 +1,4 @@
-/* OpenSprinkler Unified (AVR/RPI/BBB/LINUX) Firmware
+/* OpenSprinkler Unified Firmware
  * Copyright (C) 2015 by Ray Wang (ray@opensprinkler.com)
  *
  * Program data structures and functions header file
@@ -21,9 +21,7 @@
  * <http://www.gnu.org/licenses/>.
  */
 
-
-#ifndef _PROGRAM_H
-#define _PROGRAM_H
+#pragma once
 
 #define MAX_NUM_PROGRAMS    40  // maximum number of programs
 #define MAX_NUM_STARTTIMES  4
@@ -31,19 +29,27 @@
 #define RUNTIME_QUEUE_SIZE  MAX_NUM_STATIONS
 #define PROGRAMSTRUCT_SIZE  sizeof(ProgramStruct)
 #include "OpenSprinkler.h"
+#include "types.h"
+
+class SensorAdjustment; // forward declaration to avoid pulling sensors/sensor.h into this header
 
 /** Log data structure */
 struct LogStruct {
-	byte station;
-	byte program;
-	uint16_t duration;
+	unsigned char station;
+	unsigned char program;
+	uint32_t duration;
 	uint32_t endtime;
 };
 
-#define PROGRAM_TYPE_WEEKLY   0
-#define PROGRAM_TYPE_BIWEEKLY 1
-#define PROGRAM_TYPE_MONTHLY  2
-#define PROGRAM_TYPE_INTERVAL 3
+#define PROGRAM_TYPE_WEEKLY    0
+#define PROGRAM_TYPE_SINGLERUN 1
+#define PROGRAM_TYPE_MONTHLY   2
+#define PROGRAM_TYPE_INTERVAL  3
+
+// special program indexes used in the runtime queue and log records
+#define MANUAL_PID 99
+#define RUNONCE_PID 254
+#define RUNONCE_REPEAT_PREFIX "Run-Once with repeat"
 
 #define STARTTIME_SUNRISE_BIT 14
 #define STARTTIME_SUNSET_BIT  13
@@ -55,33 +61,33 @@ struct LogStruct {
 /** Program data structure */
 class ProgramStruct {
 public:
-	byte enabled:1;  // HIGH means the program is enabled
+	unsigned char enabled:1;  // HIGH means the program is enabled
 
 	// weather data
-	byte use_weather:1;
+	unsigned char use_weather:1;
 
 	// odd/even restriction:
 	// 0->none, 1->odd day (except 31st and Feb 29th)
 	// 2->even day, 3->N/A
-	byte oddeven:2;
+	unsigned char oddeven:2;
 
 	// schedule type:
-	// 0: weekly, 1->biweekly, 2->monthly, 3->interval
-	byte type:2;
+	// 0: weekly, 1->single-run, 2->monthly, 3->interval
+	unsigned char type:2;
 
 	// starttime type:
 	// 0: repeating (give start time, repeat every, number of repeats)
 	// 1: fixed start time (give arbitrary start times up to MAX_NUM_STARTTIMEs)
-	byte starttime_type:1;
+	unsigned char starttime_type:1;
 
 	// enable date range
-	byte en_daterange:1;
+	unsigned char en_daterange:1;
 
-	// weekly:   days[0][0..6] correspond to Monday till Sunday
-	// bi-weekly:days[0][0..6] and [1][0..6] store two weeks
-	// monthly:  days[0][0..5] stores the day of the month (32 means last day of month)
-	// interval: days[0] stores the interval (0 to 255), days[1] stores the starting day remainder (0 to 254)
-	byte days[2];
+	// weekly:    days[0][0..6] correspond to Monday till Sunday
+	// single-run:days[0] and [1] store the epoch time in days of the start
+	// monthly:   days[0][0..5] stores the day of the month (32 means last day of month)
+	// interval:  days[1] stores the interval (0 to 255), days[0] stores the starting day remainder (0 to 254)
+	unsigned char days[2];
 
 	// When the program is a fixed start time type:
 	//   up to MAX_NUM_STARTTIMES fixed start times
@@ -103,12 +109,13 @@ public:
 	char name[PROGRAM_NAME_SIZE];
 
 	int16_t daterange[2] = {MIN_ENCODED_DATE, MAX_ENCODED_DATE}; // date range: start date, end date
-	byte check_match(time_t t);
+	unsigned char check_match(time_os_t t, bool *to_delete);
+	void gen_station_runorder(uint16_t runcount, unsigned char *order);
 	int16_t starttime_decode(int16_t t);
 
 protected:
 
-	byte check_day_match(time_t t);
+	unsigned char check_day_match(time_os_t t);
 
 };
 
@@ -116,44 +123,42 @@ extern OpenSprinkler os;
 
 class RuntimeQueueStruct {
 public:
-	ulong    st;  // start time
-	uint16_t dur; // water time
-	byte  sid;
-	byte  pid;
-	ulong deque_time; // deque time, which can be larger than st+dur to allow positive master off adjustment time
+	time_os_t   st;  // start time
+	uint32_t dur; // effective water time after weather/sensor adjustments
+	unsigned char  sid;
+	unsigned char  pid;
+	time_os_t   deque_time; // deque time, which can be larger than st+dur to allow positive master off adjustment time
 };
 
 class ProgramData {
 public:
 	static RuntimeQueueStruct queue[];
-	static byte nqueue;  // number of queue elements
-	static byte station_qid[];  // this array stores the queue element index for each scheduled station
-	static byte nprograms;  // number of programs
+	static unsigned char nqueue;  // number of queue elements
+	static unsigned char station_qid[];  // this array stores the queue element index for each scheduled station
+	static unsigned char nprograms;  // number of programs
 	static LogStruct lastrun;
-	static ulong last_seq_stop_times[]; // the last stop time of a sequential station (for each sequential group respectively)
+	static time_os_t last_seq_stop_times[]; // the last stop time of a sequential station (for each sequential group respectively)
 
-	static void toggle_pause(ulong delay);
+	static void toggle_pause(uint32_t delay);
 	static void set_pause();
 	static void resume_stations();
 	static void clear_pause();
 
 	static void reset_runtime();
 	static RuntimeQueueStruct* enqueue(); // this returns a pointer to the next available slot in the queue
-	static void dequeue(byte qid);  // this removes an element from the queue
+	static void dequeue(unsigned char qid);  // this removes an element from the queue
 
 	static void init();
 	static void eraseall();
-	static void read(byte pid, ProgramStruct *buf);
-	static byte add(ProgramStruct *buf);
-	static byte modify(byte pid, ProgramStruct *buf);
-	static byte set_flagbit(byte pid, byte bid, byte value);
-	static void moveup(byte pid);
-	static byte del(byte pid);
-	static void drem_to_relative(byte days[2]); // absolute to relative reminder conversion
-	static void drem_to_absolute(byte days[2]);
+	static void read(unsigned char pid, ProgramStruct *buf);
+	static unsigned char add(ProgramStruct *buf, SensorAdjustment *adj = nullptr);
+	static unsigned char modify(unsigned char pid, ProgramStruct *buf, SensorAdjustment *adj = nullptr);
+	static unsigned char set_flagbit(unsigned char pid, unsigned char bid, unsigned char value);
+	static void moveup(unsigned char pid);
+	static unsigned char del(unsigned char pid);
+	static void drem_to_relative(unsigned char days[2]); // absolute to relative reminder conversion
+	static void drem_to_absolute(unsigned char days[2]);
 private:
 	static void load_count();
 	static void save_count();
 };
-
-#endif  // _PROGRAM_H

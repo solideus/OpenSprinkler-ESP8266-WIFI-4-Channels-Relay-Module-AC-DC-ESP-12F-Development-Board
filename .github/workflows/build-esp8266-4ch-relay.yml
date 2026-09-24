@@ -2,17 +2,31 @@ name: Build ESP8266 four-relay firmware
 
 on:
   workflow_dispatch:
+    inputs:
+      publish_release:
+        description: Publicar una nueva release de la versión compilada (solo master)
+        type: boolean
+        default: false
   push:
-    branches: [master, esp8266-4ch-relay-2215]
-    paths-ignore:
-      - "**.md"
+    branches: [master]
+    paths-ignore: ["**.md"]
+  pull_request:
+    branches: [master]
 
 permissions:
   contents: read
 
+concurrency:
+  group: relay4-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: false
+
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.package.outputs.tag }}
+      version: ${{ steps.package.outputs.version }}
+      artifact: ${{ steps.package.outputs.artifact }}
     steps:
       - name: Check out source and submodules
         uses: actions/checkout@v4
@@ -24,26 +38,75 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install PlatformIO
-        run: pip install platformio==6.2.0
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libmosquitto-dev libssl-dev
+          python -m pip install platformio==6.2.0
 
       - name: Set up Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "20"
 
-      - name: Install HTML compressor
-        run: npm install html-minifier-terser
+      - name: Install HTML build dependencies
+        run: npm ci
 
-      - name: Compile custom firmware
-        run: pio run --environment esp8266_4ch_relay
+      - name: Test board, relay sequencing and upstream API
+        run: make test-api
 
-      - name: Name firmware file
-        run: cp .pio/build/esp8266_4ch_relay/firmware.bin OpenSprinkler-2215-ESP8266-4CH.bin
+      - name: Compile custom and reference ESP8266 firmware
+        run: pio run --environment esp8266_4ch_relay --environment os3x_esp8266
 
-      - name: Upload firmware artifact
+      - name: Package custom firmware and checksums
+        id: package
+        run: python3 tools/package_esp8266_4ch.py
+
+      - name: Upload custom firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: OpenSprinkler-2215-ESP8266-4CH
-          path: OpenSprinkler-2215-ESP8266-4CH.bin
+          name: ${{ steps.package.outputs.artifact }}
+          path: dist/esp8266_4ch/*
           if-no-files-found: error
+
+  publish:
+    name: Publish ESP-12F four-relay release
+    needs: build
+    # This requested upgrade publishes once when consolidated in master.
+    # Other versions require the explicit workflow_dispatch input.
+    if: >-
+      ((github.event_name == 'workflow_dispatch' && inputs.publish_release) ||
+       (github.event_name == 'push' && needs.build.outputs.tag == '221(6)-ESP12F-4CH')) &&
+      github.ref == 'refs/heads/master' &&
+      github.repository == 'solideus/OpenSprinkler-ESP8266-WIFI-4-Channels-Relay-Module-AC-DC-ESP-12F-Development-Board'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.build.outputs.artifact }}
+          path: dist/esp8266_4ch
+
+      - name: Verify packaged files and publish a new tag and release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ needs.build.outputs.tag }}
+          RELEASE_VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          cd dist/esp8266_4ch
+          sha256sum --check SHA256SUMS.txt
+          cd ../..
+          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Release already exists; leaving its tag and assets unchanged."
+            exit 0
+          fi
+          # Creating a fresh ref fails if the tag already exists: never replace a release.
+          gh api "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$GITHUB_SHA"
+          gh release create "$RELEASE_TAG" dist/esp8266_4ch/* \
+            --verify-tag --latest \
+            --title "OpenSprinkler $RELEASE_VERSION — ESP-12F 4 relés (4 MB)" \
+            --notes-file "docs/releases/$RELEASE_TAG.md"
